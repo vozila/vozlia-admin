@@ -1,56 +1,58 @@
-import { useSession } from "next-auth/react"
 import { useEffect, useState } from "react"
 
-export default function Admin() {
-  const { data: session } = useSession()
+export default function AdminPage() {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
   const [settings, setSettings] = useState<any>({})
 
   useEffect(() => {
-    if (!session?.backendToken) return
-
-    fetch(`${API}/settings/me`, {
-      headers: {
-        Authorization: `Bearer ${session.backendToken}`
-      }
-    })
-      .then(res => res.json())
-      .then(setSettings)
-  }, [session])
+    (async () => {
+      const res = await fetch("/api/admin/settings")
+      const data = await res.json()
+      setSettings(data)
+      setLoading(false)
+    })()
+  }, [])
 
   const save = async () => {
-    await fetch(`${API}/settings/me`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${session.backendToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(settings)
+    setSaving(true)
+    await fetch("/api/admin/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(settings),
     })
+    setSaving(false)
   }
 
+  if (loading) return <div style={{ padding: 24 }}>Loading…</div>
+
   return (
-    <div>
+    <div style={{ padding: 24, maxWidth: 720 }}>
       <h1>Vozlia Admin</h1>
 
+      <label>Greeting</label>
       <textarea
-        value={settings.agent_greeting || ""}
-        onChange={e =>
-          setSettings({ ...settings, agent_greeting: e.target.value })
-        }
+        style={{ width: "100%", height: 120 }}
+        value={settings.agent_greeting ?? ""}
+        onChange={(e) => setSettings({ ...settings, agent_greeting: e.target.value })}
       />
 
-      <label>
-        Email summaries
-        <input
-          type="checkbox"
-          checked={settings.gmail_summary_enabled}
-          onChange={e =>
-            setSettings({ ...settings, gmail_summary_enabled: e.target.checked })
-          }
-        />
-      </label>
+      <div style={{ marginTop: 16 }}>
+        <label>
+          <input
+            type="checkbox"
+            checked={!!settings.gmail_summary_enabled}
+            onChange={(e) => setSettings({ ...settings, gmail_summary_enabled: e.target.checked })}
+          />
+          {" "}Enable email summaries
+        </label>
+      </div>
 
-      <button onClick={save}>Save</button>
+      <div style={{ marginTop: 16 }}>
+        <button onClick={save} disabled={saving}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </div>
     </div>
   )
 }
