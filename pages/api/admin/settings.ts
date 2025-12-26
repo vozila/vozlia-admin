@@ -1,25 +1,53 @@
-import type { NextApiRequest, NextApiResponse } from "next"
+import type { NextApiRequest, NextApiResponse } from "next";
 
-const BACKEND_BASE = process.env.VOZLIA_CONTROL_BASE_URL!
-const ADMIN_KEY = process.env.VOZLIA_ADMIN_KEY!
+function requiredEnv(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing required env var: ${name}`);
+  return v;
+}
+
+async function readJsonSafe(r: Response) {
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text };
+  }
+}
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  const url = `${BACKEND_BASE}/admin/settings`
+  try {
+    const baseUrl = requiredEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/$/, "");
+    const adminKey = requiredEnv("VOZLIA_CONTROL_ADMIN_KEY");
+    const upstreamUrl = `${baseUrl}/admin/settings`;
 
-  const headers: Record<string, string> = {
-    "X-Vozlia-Admin-Key": ADMIN_KEY,
+    if (req.method === "GET") {
+      const upstream = await fetch(upstreamUrl, {
+        method: "GET",
+        headers: { "X-Vozlia-Admin-Key": adminKey },
+      });
+      const data = await readJsonSafe(upstream);
+      res.status(upstream.status).json(data);
+      return;
+    }
+
+    if (req.method === "PATCH") {
+      const upstream = await fetch(upstreamUrl, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Vozlia-Admin-Key": adminKey,
+        },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      const data = await readJsonSafe(upstream);
+      res.status(upstream.status).json(data);
+      return;
+    }
+
+    res.setHeader("Allow", "GET, PATCH");
+    res.status(405).json({ detail: "Method Not Allowed" });
+  } catch (err: any) {
+    res.status(500).json({ detail: "Admin API error", error: err?.message ?? String(err) });
   }
-
-  if (req.headers["content-type"]) {
-    headers["Content-Type"] = String(req.headers["content-type"])
-  }
-
-  const upstream = await fetch(url, {
-    method: req.method,
-    headers,
-    body: req.method === "GET" || req.method === "HEAD" ? undefined : JSON.stringify(req.body),
-  })
-
-  const text = await upstream.text()
-  res.status(upstream.status).send(text)
 }
