@@ -1,4 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
+import { getServerSession } from "next-auth/next";
+import { authOptions } from "../auth/[...nextauth]";
 
 /**
  * Vercel API Route: /api/admin/settings
@@ -12,6 +14,9 @@ import type { NextApiRequest, NextApiResponse } from "next";
  * - VOZLIA_ADMIN_KEY          (your X-Vozlia-Admin-Key for the control service)
  */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const session = await getServerSession(req, res, authOptions);
+  if (!session) return res.status(401).json({ error: "Unauthorized" });
+
   const BACKEND_BASE = process.env.VOZLIA_CONTROL_BASE_URL;
   const ADMIN_KEY = process.env.VOZLIA_ADMIN_KEY;
 
@@ -30,13 +35,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const url = `${BACKEND_BASE.replace(/\/$/, "")}/admin/settings`;
 
   try {
-    // Basic request logging shows up in Vercel "Functions" logs.
-    console.log("/api/admin/settings", req.method, "->", url);
-
-    // Prevent long hangs.
-    const ac = new AbortController();
-    const timeout = setTimeout(() => ac.abort(), 15_000);
-
     const headers: Record<string, string> = {
       "X-Vozlia-Admin-Key": ADMIN_KEY,
       Accept: "application/json",
@@ -45,7 +43,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     let upstream: Response;
 
     if (req.method === "GET") {
-      upstream = await fetch(url, { method: "GET", headers, signal: ac.signal });
+      upstream = await fetch(url, { method: "GET", headers });
     } else {
       headers["Content-Type"] = "application/json";
 
@@ -53,31 +51,25 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         method: "PATCH",
         headers,
         body: JSON.stringify(req.body ?? {}),
-        signal: ac.signal,
       });
     }
 
-    clearTimeout(timeout);
-
-    console.log("/api/admin/settings upstream status", upstream.status);
-
     const text = await upstream.text();
+    const contentType = upstream.headers.get("content-type") || "application/json";
     res.status(upstream.status);
+    res.setHeader("Content-Type", contentType);
 
-    // Prefer JSON responses for clients (even if upstream forgets the header).
-    // If upstream returns non-JSON, fall back to text.
+    // Try JSON first, but don't die if upstream sends plain-text.
     try {
       const json = text ? JSON.parse(text) : {};
       return res.json(json);
     } catch {
-      res.setHeader("Content-Type", "text/plain; charset=utf-8");
       return res.send(text);
     }
   } catch (err: any) {
-    const aborted = err?.name === "AbortError";
     return res.status(502).json({
       detail: "Upstream request failed",
-      error: aborted ? "Timeout contacting control service" : (err?.message ?? String(err)),
+      error: err?.message ?? String(err),
     });
   }
 }
