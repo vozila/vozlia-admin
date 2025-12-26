@@ -1,53 +1,70 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
-function requiredEnv(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing required env var: ${name}`);
-  return v;
-}
-
-async function readJsonSafe(r: Response) {
-  const text = await r.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text };
-  }
-}
-
+/**
+ * Vercel API Route: /api/admin/settings
+ *
+ * Server-side proxy to the Render "vozlia-control" service.
+ * - avoids CORS issues
+ * - keeps admin key secret (never exposed to the browser)
+ *
+ * Required env vars (set in Vercel → Project → Settings → Environment Variables):
+ * - VOZLIA_CONTROL_BASE_URL   (e.g. https://vozlia-control.onrender.com)
+ * - VOZLIA_ADMIN_KEY          (your X-Vozlia-Admin-Key for the control service)
+ */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const BACKEND_BASE = process.env.VOZLIA_CONTROL_BASE_URL;
+  const ADMIN_KEY = process.env.VOZLIA_ADMIN_KEY;
+
+  if (!BACKEND_BASE || !ADMIN_KEY) {
+    return res.status(500).json({
+      detail:
+        "Missing env vars. Set VOZLIA_CONTROL_BASE_URL and VOZLIA_ADMIN_KEY in Vercel.",
+    });
+  }
+
+  if (req.method !== "GET" && req.method !== "PATCH") {
+    res.setHeader("Allow", "GET, PATCH");
+    return res.status(405).json({ detail: "Method Not Allowed" });
+  }
+
+  const url = `${BACKEND_BASE.replace(/\/$/, "")}/admin/settings`;
+
   try {
-    const baseUrl = requiredEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/$/, "");
-    const adminKey = requiredEnv("VOZLIA_CONTROL_ADMIN_KEY");
-    const upstreamUrl = `${baseUrl}/admin/settings`;
+    const headers: Record<string, string> = {
+      "X-Vozlia-Admin-Key": ADMIN_KEY,
+      Accept: "application/json",
+    };
+
+    let upstream: Response;
 
     if (req.method === "GET") {
-      const upstream = await fetch(upstreamUrl, {
-        method: "GET",
-        headers: { "X-Vozlia-Admin-Key": adminKey },
-      });
-      const data = await readJsonSafe(upstream);
-      res.status(upstream.status).json(data);
-      return;
-    }
+      upstream = await fetch(url, { method: "GET", headers });
+    } else {
+      headers["Content-Type"] = "application/json";
 
-    if (req.method === "PATCH") {
-      const upstream = await fetch(upstreamUrl, {
+      upstream = await fetch(url, {
         method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Vozlia-Admin-Key": adminKey,
-        },
+        headers,
         body: JSON.stringify(req.body ?? {}),
       });
-      const data = await readJsonSafe(upstream);
-      res.status(upstream.status).json(data);
-      return;
     }
 
-    res.setHeader("Allow", "GET, PATCH");
-    res.status(405).json({ detail: "Method Not Allowed" });
+    const text = await upstream.text();
+    const contentType = upstream.headers.get("content-type") || "application/json";
+    res.status(upstream.status);
+    res.setHeader("Content-Type", contentType);
+
+    // Try JSON first, but don't die if upstream sends plain-text.
+    try {
+      const json = text ? JSON.parse(text) : {};
+      return res.json(json);
+    } catch {
+      return res.send(text);
+    }
   } catch (err: any) {
-    res.status(500).json({ detail: "Admin API error", error: err?.message ?? String(err) });
+    return res.status(502).json({
+      detail: "Upstream request failed",
+      error: err?.message ?? String(err),
+    });
   }
 }
