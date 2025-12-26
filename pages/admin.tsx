@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react"
+import type { GetServerSidePropsContext } from "next";
+import { useEffect, useState } from "react";
+import { useSession } from "next-auth/react";
 
 export default function AdminPage() {
   const { data: session } = useSession();
