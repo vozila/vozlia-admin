@@ -30,6 +30,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const url = `${BACKEND_BASE.replace(/\/$/, "")}/admin/settings`;
 
   try {
+    // Basic request logging shows up in Vercel "Functions" logs.
+    console.log("/api/admin/settings", req.method, "->", url);
+
+    // Prevent long hangs.
+    const ac = new AbortController();
+    const timeout = setTimeout(() => ac.abort(), 15_000);
+
     const headers: Record<string, string> = {
       "X-Vozlia-Admin-Key": ADMIN_KEY,
       Accept: "application/json",
@@ -38,7 +45,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     let upstream: Response;
 
     if (req.method === "GET") {
-      upstream = await fetch(url, { method: "GET", headers });
+      upstream = await fetch(url, { method: "GET", headers, signal: ac.signal });
     } else {
       headers["Content-Type"] = "application/json";
 
@@ -46,25 +53,31 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         method: "PATCH",
         headers,
         body: JSON.stringify(req.body ?? {}),
+        signal: ac.signal,
       });
     }
 
-    const text = await upstream.text();
-    const contentType = upstream.headers.get("content-type") || "application/json";
-    res.status(upstream.status);
-    res.setHeader("Content-Type", contentType);
+    clearTimeout(timeout);
 
-    // Try JSON first, but don't die if upstream sends plain-text.
+    console.log("/api/admin/settings upstream status", upstream.status);
+
+    const text = await upstream.text();
+    res.status(upstream.status);
+
+    // Prefer JSON responses for clients (even if upstream forgets the header).
+    // If upstream returns non-JSON, fall back to text.
     try {
       const json = text ? JSON.parse(text) : {};
       return res.json(json);
     } catch {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
       return res.send(text);
     }
   } catch (err: any) {
+    const aborted = err?.name === "AbortError";
     return res.status(502).json({
       detail: "Upstream request failed",
-      error: err?.message ?? String(err),
+      error: aborted ? "Timeout contacting control service" : (err?.message ?? String(err)),
     });
   }
 }
