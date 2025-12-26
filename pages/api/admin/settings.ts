@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next"
 
-const BACKEND_BASE = process.env.BACKEND_BASE_URL!
-const ADMIN_KEY = process.env.ADMIN_API_KEY!
+const BACKEND_BASE = process.env.VOZLIA_CONTROL_BASE_URL!
+const ADMIN_KEY = process.env.VOZLIA_ADMIN_KEY!
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const url = `${BACKEND_BASE}/admin/settings`
