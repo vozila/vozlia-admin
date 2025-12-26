@@ -1,50 +1,64 @@
 import { NextResponse } from "next/server";
 
-export const runtime = "nodejs"; // important: keep this on server
+const CONTROL_BASE = process.env.VOZLIA_CONTROL_BASE_URL;
+const ADMIN_KEY = process.env.VOZLIA_ADMIN_KEY;
 
-const BASE = process.env.VOZLIA_CONTROL_BASE_URL;
-const KEY = process.env.VOZLIA_ADMIN_KEY;
-
-function requireEnv(name: string, value?: string) {
-  if (!value) throw new Error(`Missing env var: ${name}`);
+function requireEnv() {
+  if (!CONTROL_BASE) {
+    return NextResponse.json(
+      { detail: "Missing VOZLIA_CONTROL_BASE_URL env var" },
+      { status: 500 }
+    );
+  }
+  if (!ADMIN_KEY) {
+    return NextResponse.json(
+      { detail: "Missing VOZLIA_ADMIN_KEY env var" },
+      { status: 500 }
+    );
+  }
+  return null;
 }
 
-async function forward(req: Request, method: "GET" | "PATCH") {
-  requireEnv("VOZLIA_CONTROL_BASE_URL", BASE);
-  requireEnv("VOZLIA_ADMIN_KEY", KEY);
+function controlUrl(path: string) {
+  return `${CONTROL_BASE}${path.startsWith("/") ? "" : "/"}${path}`;
+}
 
-  const url = `${BASE}/admin/settings`;
+export async function GET() {
+  const envErr = requireEnv();
+  if (envErr) return envErr;
 
-  const headers: Record<string, string> = {
-    "X-Vozlia-Admin-Key": KEY!,
-    "Accept": "application/json",
-  };
-
-  let body: string | undefined;
-  if (method === "PATCH") {
-    headers["Content-Type"] = "application/json";
-    body = await req.text();
-  }
-
-  const resp = await fetch(url, {
-    method,
-    headers,
-    body,
-    // keep it simple + predictable
+  const r = await fetch(controlUrl("/admin/settings"), {
+    headers: {
+      "X-Vozlia-Admin-Key": ADMIN_KEY!,
+    },
     cache: "no-store",
   });
 
-  const text = await resp.text();
+  const text = await r.text();
   return new NextResponse(text, {
-    status: resp.status,
-    headers: { "Content-Type": resp.headers.get("content-type") || "application/json" },
+    status: r.status,
+    headers: { "Content-Type": r.headers.get("content-type") ?? "application/json" },
   });
 }
 
-export async function GET(req: Request) {
-  return forward(req, "GET");
-}
-
 export async function PATCH(req: Request) {
-  return forward(req, "PATCH");
+  const envErr = requireEnv();
+  if (envErr) return envErr;
+
+  const body = await req.text();
+
+  const r = await fetch(controlUrl("/admin/settings"), {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Vozlia-Admin-Key": ADMIN_KEY!,
+    },
+    body,
+  });
+
+  const text = await r.text();
+  return new NextResponse(text, {
+    status: r.status,
+    headers: { "Content-Type": r.headers.get("content-type") ?? "application/json" },
+  });
 }
