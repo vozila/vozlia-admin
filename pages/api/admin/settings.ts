@@ -6,60 +6,43 @@ import { authOptions } from "../auth/[...nextauth]";
  * Vercel API Route: /api/admin/settings
  *
  * Server-side proxy to the Render "vozlia-control" service.
- * - avoids CORS issues
- * - keeps admin key secret (never exposed to the browser)
+ * Keeps the admin key server-side.
  *
- * Required env vars (set in Vercel → Project → Settings → Environment Variables):
- * - VOZLIA_CONTROL_BASE_URL   (e.g. https://vozlia-control.onrender.com)
- * - VOZLIA_ADMIN_KEY          (your X-Vozlia-Admin-Key for the control service)
+ * Env vars (Vercel):
+ * - VOZLIA_CONTROL_BASE_URL   e.g. https://vozlia-control.onrender.com
+ * - VOZLIA_ADMIN_KEY         value for X-Vozlia-Admin-Key
  */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const session = await getServerSession(req, res, authOptions);
-  if (!session) return res.status(401).json({ error: "Unauthorized" });
-
-  const BACKEND_BASE = process.env.VOZLIA_CONTROL_BASE_URL;
-  const ADMIN_KEY = process.env.VOZLIA_ADMIN_KEY;
-
-  if (!BACKEND_BASE || !ADMIN_KEY) {
-    return res.status(500).json({
-      detail:
-        "Missing env vars. Set VOZLIA_CONTROL_BASE_URL and VOZLIA_ADMIN_KEY in Vercel.",
-    });
-  }
+  if (!session) return res.status(401).json({ detail: "Unauthorized" });
 
   if (req.method !== "GET" && req.method !== "PATCH") {
     res.setHeader("Allow", "GET, PATCH");
-    return res.status(405).json({ detail: "Method Not Allowed" });
+    return res.status(405).json({ detail: "Method not allowed" });
   }
 
-  const url = `${BACKEND_BASE.replace(/\/$/, "")}/admin/settings`;
+  const baseUrl = process.env.VOZLIA_CONTROL_BASE_URL;
+  const adminKey = process.env.VOZLIA_ADMIN_KEY;
+  if (!baseUrl || !adminKey) {
+    return res.status(500).json({ detail: "Missing VOZLIA_CONTROL_BASE_URL or VOZLIA_ADMIN_KEY" });
+  }
+
+  const upstreamUrl = `${baseUrl.replace(/\/$/, "")}/admin/settings`;
 
   try {
-    const headers: Record<string, string> = {
-      "X-Vozlia-Admin-Key": ADMIN_KEY,
-      Accept: "application/json",
-    };
-
-    let upstream: Response;
-
-    if (req.method === "GET") {
-      upstream = await fetch(url, { method: "GET", headers });
-    } else {
-      headers["Content-Type"] = "application/json";
-
-      upstream = await fetch(url, {
-        method: "PATCH",
-        headers,
-        body: JSON.stringify(req.body ?? {}),
-      });
-    }
+    const upstream = await fetch(upstreamUrl, {
+      method: req.method,
+      headers: {
+        "X-Vozlia-Admin-Key": adminKey,
+        "Accept": "application/json",
+        ...(req.method === "PATCH" ? { "Content-Type": "application/json" } : {}),
+      },
+      body: req.method === "PATCH" ? JSON.stringify(req.body ?? {}) : undefined,
+    });
 
     const text = await upstream.text();
-    const contentType = upstream.headers.get("content-type") || "application/json";
     res.status(upstream.status);
-    res.setHeader("Content-Type", contentType);
 
-    // Try JSON first, but don't die if upstream sends plain-text.
     try {
       const json = text ? JSON.parse(text) : {};
       return res.json(json);
