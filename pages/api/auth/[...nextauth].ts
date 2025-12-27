@@ -21,8 +21,9 @@ export const authOptions: NextAuthOptions = {
   secret: process.env.NEXTAUTH_SECRET,
   callbacks: {
     async signIn({ user }) {
-      // If no allowlist is set, any Google account with a verified email may sign in.
+      // If no allowlist is set, allow any Google account.
       if (allowedEmails.length === 0) return true;
+
       const email = (user.email ?? "").toLowerCase();
       return allowedEmails.includes(email);
     },
