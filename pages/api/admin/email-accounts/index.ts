@@ -2,52 +2,40 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "../../auth/[...nextauth]";
 
-/**
- * Vercel API Route: /api/admin/email-accounts
- *
- * Proxies to vozlia-control:
- *   GET /admin/email-accounts?include_inactive=true|false
- */
+function mustEnv(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env var: ${name}`);
+  return v;
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const session = await getServerSession(req, res, authOptions);
-  if (!session) return res.status(401).json({ detail: "Unauthorized" });
+  if (!session) return res.status(401).json({ error: "unauthorized" });
 
-  if (req.method !== "GET") {
-    res.setHeader("Allow", "GET");
-    return res.status(405).json({ detail: "Method not allowed" });
-  }
+  const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
+  const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
 
-  const baseUrl = process.env.VOZLIA_CONTROL_BASE_URL;
-  const adminKey = process.env.VOZLIA_ADMIN_KEY;
-  if (!baseUrl || !adminKey) {
-    return res.status(500).json({ detail: "Missing VOZLIA_CONTROL_BASE_URL or VOZLIA_ADMIN_KEY" });
-  }
+  const includeInactive =
+    typeof req.query.include_inactive === "string"
+      ? req.query.include_inactive
+      : "true";
 
-  const includeInactive = (req.query.include_inactive ?? "true").toString();
-  const upstreamUrl = `${baseUrl.replace(/\/$/, "")}/admin/email-accounts?include_inactive=${encodeURIComponent(includeInactive)}`;
+  const url = `${CONTROL_BASE}/admin/email-accounts?include_inactive=${encodeURIComponent(includeInactive)}`;
 
   try {
-    const upstream = await fetch(upstreamUrl, {
+    const upstream = await fetch(url, {
       method: "GET",
       headers: {
-        "X-Vozlia-Admin-Key": adminKey,
-        "Accept": "application/json",
+        "X-Vozlia-Admin-Key": ADMIN_KEY,
+        Accept: "application/json",
       },
     });
 
     const text = await upstream.text();
     res.status(upstream.status);
-
-    try {
-      const json = text ? JSON.parse(text) : [];
-      return res.json(json);
-    } catch {
-      return res.send(text);
-    }
+    res.setHeader("content-type", upstream.headers.get("content-type") || "application/json");
+    return res.send(text);
   } catch (err: any) {
-    return res.status(502).json({
-      detail: "Upstream request failed",
-      error: err?.message ?? String(err),
-    });
+    return res.status(500).json({ error: "proxy_failed", detail: String(err?.message || err) });
   }
 }
