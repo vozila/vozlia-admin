@@ -1,5 +1,27 @@
 import React, { useEffect, useMemo, useState } from "react";
 
+function formatEastern(ts?: string) {
+  if (!ts) return "";
+
+  // If backend already returns "2025-12-30 11:23:45 EST", leave it alone
+  if (!ts.includes("T")) return ts;
+
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).format(d);
+}
+
 type LogRow = {
   ts?: string;
   level?: string;
@@ -349,7 +371,7 @@ export function RenderLogsPanel() {
             <tbody>
               {rows.map((r, idx) => (
                 <tr key={idx} style={{ borderBottom: "1px solid #f2f2f2" }}>
-                  <td style={{ padding: 8, fontFamily: "monospace", fontSize: 12, color: "#444" }}>{r.ts || ""}</td>
+                  <td style={{ padding: 8, fontFamily: "monospace", fontSize: 12, color: "#444" }}>{formatEastern(r.ts)}</td>
                   <td style={{ padding: 8, fontFamily: "monospace", fontSize: 12 }}>{r.level || ""}</td>
                   <td style={{ padding: 8, fontFamily: "monospace", fontSize: 12, wordBreak: "break-word" }} title={r.raw}>
                     {r.msg || r.raw}
