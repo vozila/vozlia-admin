@@ -169,28 +169,47 @@ export function RenderLogsPanel() {
     }
   }
 
+  
   async function loadMore() {
     if (!serviceId || !cursor?.has_more) return;
     setBusy(true);
     setError(null);
     try {
-      const { status, data } = await apiGet<LogsResponse & { trace?: string }>("/api/admin/render/logs", {
-        service_id: serviceId,
-        instance_id: instanceId || "",
-        start_ms: String(cursor.start_ms),
-        end_ms: String(cursor.end_ms),
-        q: search || "",
-        limit: "300",
-        page: "next",
-      }, setLastTrace);
-      if (status >= 400) throw new Error(`logs_fetch_failed status=${status} ${JSON.stringify(data)}`);
+      let backoffMs = 600;
 
-      setRows((prev) => [...prev, ...(data.rows || [])]);
-      setCursor({
-        start_ms: data.next_start_ms ?? data.start_ms,
-        end_ms: data.next_end_ms ?? data.end_ms,
-        has_more: !!data.has_more,
-      });
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const { status, data } = await apiGet<LogsResponse & { trace?: string }>(
+          "/api/admin/render/logs",
+          {
+            service_id: serviceId,
+            instance_id: instanceId || "",
+            start_ms: String(cursor.start_ms),
+            end_ms: String(cursor.end_ms),
+            q: search || "",
+            limit: "300",
+            page: "next",
+          },
+          setLastTrace
+        );
+
+        if (status === 429) {
+          setError(`Rate limited by Render. Retrying in ${(backoffMs / 1000).toFixed(1)}s...`);
+          await new Promise((r) => setTimeout(r, backoffMs));
+          backoffMs = Math.min(backoffMs * 2, 8000);
+          continue;
+        }
+
+        if (status >= 400) throw new Error(`logs_fetch_failed status=${status} ${JSON.stringify(data)}`);
+
+        setRows((prev) => [...prev, ...(data.rows || [])]);
+        setCursor({
+          start_ms: data.next_start_ms ?? data.start_ms,
+          end_ms: data.next_end_ms ?? data.end_ms,
+          has_more: !!data.has_more,
+        });
+        setError(null);
+        break;
+      }
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
@@ -198,11 +217,16 @@ export function RenderLogsPanel() {
     }
   }
 
+
+  
   async function loadAll() {
     if (!serviceId) return;
     if (!cursor?.has_more) return;
+
     setBusy(true);
     setError(null);
+
+    let backoffMs = 600; // base backoff for 429
     try {
       let pages = 0;
       let cur = cursor;
@@ -229,7 +253,19 @@ export function RenderLogsPanel() {
           setLastTrace
         );
 
+        if (status === 429) {
+          // Render rate limit: back off and retry same page window
+          setError(`Rate limited by Render. Retrying in ${(backoffMs / 1000).toFixed(1)}s...`);
+          await new Promise((r) => setTimeout(r, backoffMs));
+          backoffMs = Math.min(backoffMs * 2, 8000);
+          continue;
+        }
+
         if (status >= 400) throw new Error(`logs_fetch_failed status=${status} ${JSON.stringify(data)}`);
+
+        // success: reset backoff
+        backoffMs = 600;
+        setError(null);
 
         setRows((prev) => [...prev, ...(data.rows || [])]);
 
@@ -241,8 +277,8 @@ export function RenderLogsPanel() {
         setCursor(nextCur);
         cur = nextCur;
 
-        // Yield to the browser between pages
-        await new Promise((r) => setTimeout(r, 0));
+        // small pacing to avoid hitting upstream limits
+        await new Promise((r) => setTimeout(r, 250));
       }
     } catch (e: any) {
       setError(e?.message ?? String(e));
@@ -250,6 +286,7 @@ export function RenderLogsPanel() {
       setBusy(false);
     }
   }
+
 
 
   async function downloadLast(minutes: number, format: ExportFormat = "csv") {
