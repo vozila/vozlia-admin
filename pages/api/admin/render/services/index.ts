@@ -16,6 +16,15 @@ function getBaseUrl(): string | undefined {
   return getEnv("VOZLIA_CONTROL_BASE_URL") || getEnv("VOZLIA_CONTROL_PLANE_URL");
 }
 
+function parseLimit(q: unknown): number {
+  const raw = Array.isArray(q) ? q[0] : q;
+  let n = parseInt(String(raw ?? "100"), 10);
+  if (!Number.isFinite(n) || n < 1) n = 100;
+  // Render list endpoints: max 100
+  if (n > 100) n = 100;
+  return n;
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const session = await getServerSession(req, res, authOptions);
   if (!session) return res.status(401).json({ error: "unauthorized" });
@@ -32,9 +41,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const debug = getEnv("VOZLIA_DEBUG_RENDER_LOGS") === "1";
 
-  const limit = String(req.query.limit || "200");
+  const limit = parseLimit(req.query.limit);
   const url = new URL(`${baseUrl.replace(/\/$/, "")}/admin/render/services`);
-  url.searchParams.set("limit", limit);
+  url.searchParams.set("limit", String(limit));
 
   const t0 = Date.now();
   try {
@@ -49,12 +58,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const ms = Date.now() - t0;
     const contentType = upstream.headers.get("content-type") || "";
-
     const rawText = await upstream.text();
 
     if (debug) {
       const preview = rawText.slice(0, 400).replace(/\s+/g, " ");
-      console.log(`[render-proxy][${trace}] GET /services -> ${upstream.status} ${ms}ms ct=${contentType} body='${preview}'`);
+      console.log(
+        `[render-proxy][${trace}] GET /admin/render/services?limit=${limit} -> ${upstream.status} ${ms}ms ct=${contentType} body='${preview}'`
+      );
     }
 
     res.status(upstream.status);
@@ -67,7 +77,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         if (Array.isArray(parsed)) return res.json({ services: parsed, trace });
         if (parsed && typeof parsed === "object") {
           if (Array.isArray((parsed as any).services)) return res.json({ ...(parsed as any), trace });
-          // If upstream returned a single object, wrap as 1-item list
           if ((parsed as any).id && (parsed as any).name) return res.json({ services: [parsed], trace });
           return res.json({ ...(parsed as any), trace });
         }
