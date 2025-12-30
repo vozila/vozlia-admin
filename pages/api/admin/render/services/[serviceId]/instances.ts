@@ -19,10 +19,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!id) return res.status(400).json({ error: "missing_service_id" });
 
     const CONTROL_BASE = (env("VOZLIA_CONTROL_BASE_URL") || "").replace(/\/+$/, "");
-    const ADMIN_KEY = env("VOZLIA_ADMIN_API_KEY") || "";
+    const ADMIN_KEY = env("VOZLIA_ADMIN_KEY") || env("VOZLIA_ADMIN_API_KEY") || "";
 
     if (!CONTROL_BASE) return res.status(500).json({ error: "missing_env", name: "VOZLIA_CONTROL_BASE_URL" });
-    if (!ADMIN_KEY) return res.status(500).json({ error: "missing_env", name: "VOZLIA_ADMIN_API_KEY" });
+    if (!ADMIN_KEY) return res.status(500).json({ error: "missing_env", name: "VOZLIA_ADMIN_KEY" });
 
     const url = `${CONTROL_BASE}/admin/render/services/${encodeURIComponent(id)}/instances`;
 
