@@ -8,28 +8,41 @@ function mustEnv(name: string): string {
   return v;
 }
 
+function pickFirst(v: string | string[] | undefined): string | undefined {
+  if (!v) return undefined;
+  return Array.isArray(v) ? v[0] : v;
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const session = await getServerSession(req, res, authOptions);
   if (!session) return res.status(401).json({ error: "unauthorized" });
 
   if (req.method !== "GET") return res.status(405).json({ error: "method_not_allowed" });
 
-  const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
-  const ADMIN_KEY = process.env.VOZLIA_ADMIN_KEY || process.env.VOZLIA_ADMIN_API_KEY;
-  if (!ADMIN_KEY) return res.status(500).json({ error: "missing_env", name: "VOZLIA_ADMIN_KEY" });
-
-  const { service_id, instance_id, start_ms, end_ms, q, limit, page } = req.query;
-
+  const service_id = pickFirst(req.query.service_id);
   if (!service_id) return res.status(400).json({ error: "missing_service_id" });
 
+  const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
+  const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
+
   const params = new URLSearchParams();
-  params.set("service_id", String(Array.isArray(service_id) ? service_id[0] : service_id));
-  if (instance_id) params.set("instance_id", String(Array.isArray(instance_id) ? instance_id[0] : instance_id));
-  if (start_ms) params.set("start_ms", String(Array.isArray(start_ms) ? start_ms[0] : start_ms));
-  if (end_ms) params.set("end_ms", String(Array.isArray(end_ms) ? end_ms[0] : end_ms));
-  if (q) params.set("q", String(Array.isArray(q) ? q[0] : q));
-  if (limit) params.set("limit", String(Array.isArray(limit) ? limit[0] : limit));
-  if (page) params.set("page", String(Array.isArray(page) ? page[0] : page));
+  params.set("service_id", service_id);
+
+  const instance_id = pickFirst(req.query.instance_id);
+  if (instance_id) params.set("instance_id", instance_id);
+
+  // Optional: if not supplied, let control-plane default window
+  const start_ms = pickFirst(req.query.start_ms);
+  const end_ms = pickFirst(req.query.end_ms);
+  const limit = pickFirst(req.query.limit);
+  const q = pickFirst(req.query.q);
+  const page = pickFirst(req.query.page);
+
+  if (start_ms) params.set("start_ms", start_ms);
+  if (end_ms) params.set("end_ms", end_ms);
+  if (limit) params.set("limit", limit);
+  if (q) params.set("q", q);
+  if (page) params.set("page", page);
 
   const url = `${CONTROL_BASE}/admin/render/logs?${params.toString()}`;
 
@@ -42,11 +55,32 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       },
     });
 
-    const text = await upstream.text();
-    res.status(upstream.status);
-    res.setHeader("content-type", upstream.headers.get("content-type") || "application/json");
-    return res.send(text);
+    const rawText = await upstream.text();
+    const contentType = upstream.headers.get("content-type") || "";
+
+    if (!upstream.ok) {
+      return res.status(502).json({
+        error: "upstream_error",
+        status: upstream.status,
+        detail: rawText.slice(0, 2000),
+      });
+    }
+
+    if (contentType.includes("application/json")) {
+      const parsed = rawText ? JSON.parse(rawText) : {};
+      // Prefer pass-through; UI expects object with rows/has_more
+      return res.status(200).json(parsed);
+    }
+
+    // Unexpected content-type; wrap raw lines so UI at least shows something
+    return res.status(200).json({
+      service_id,
+      rows: rawText
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => ({ raw: line })),
+    });
   } catch (err: any) {
-    return res.status(502).json({ detail: "Upstream request failed", error: err?.message ?? String(err) });
+    return res.status(502).json({ error: "proxy_failed", detail: err?.message ?? String(err) });
   }
 }
