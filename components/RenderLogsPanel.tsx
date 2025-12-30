@@ -35,14 +35,29 @@ function formatFileName(serviceName: string, minutes: number, fmt: ExportFormat)
   return `render-logs_${serviceName || "service"}_${minutes}min_${ts}.${fmt}`;
 }
 
-async function apiGet<T>(path: string, params?: Record<string, string>) {
+async function apiGet<T>(
+  path: string,
+  params?: Record<string, string>,
+  onTrace?: (trace: string) => void
+): Promise<{ status: number; data: T }> {
   const qs = params ? `?${new URLSearchParams(params).toString()}` : "";
   const resp = await fetch(`${path}${qs}`, { method: "GET" });
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`${resp.status} ${resp.statusText} ${t}`.trim());
+  const trace = resp.headers.get("x-vozlia-trace") || resp.headers.get("X-Vozlia-Trace") || "";
+  if (trace && onTrace) onTrace(trace);
+
+  const contentType = resp.headers.get("content-type") || "";
+  const raw = await resp.text();
+
+  let data: any = raw;
+  if (contentType.includes("application/json")) {
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      data = { error: "bad_json", raw };
+    }
   }
-  return (await resp.json()) as T;
+
+  return { status: resp.status, data: data as T };
 }
 
 export function RenderLogsPanel() {
@@ -61,17 +76,20 @@ export function RenderLogsPanel() {
   const [busy, setBusy] = useState<boolean>(false);
   const [busyDl, setBusyDl] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lastTrace, setLastTrace] = useState<string>("");
 
   const [cursor, setCursor] = useState<{ start_ms: number; end_ms: number; has_more: boolean } | null>(null);
 
   async function loadServices() {
-    const data = await apiGet<{ services: RenderService[] }>("/api/admin/render/services");
+    const { status, data } = await apiGet<{ services: RenderService[]; trace?: string }>("/api/admin/render/services", undefined, setLastTrace);
+      if (status >= 400) throw new Error(`services_fetch_failed status=${status} ${JSON.stringify(data)}`);
     setServices(data.services || []);
   }
 
   async function loadInstances(svcId: string) {
     if (!svcId) return;
-    const data = await apiGet<{ instances: RenderInstance[] }>(`/api/admin/render/services/${svcId}/instances`);
+    const { status, data } = await apiGet<{ instances: RenderInstance[]; trace?: string }>(`/api/admin/render/services/${svcId}/instances`, undefined, setLastTrace);
+      if (status >= 400) throw new Error(`instances_fetch_failed status=${status} ${JSON.stringify(data)}`);
     setInstances(data.instances || []);
   }
 
@@ -83,14 +101,15 @@ export function RenderLogsPanel() {
       const end_ms = nowMs();
       const start_ms = minutesAgoMs(windowMin);
 
-      const data = await apiGet<LogsResponse>("/api/admin/render/logs", {
+      const { status, data } = await apiGet<LogsResponse & { trace?: string }>("/api/admin/render/logs", {
         service_id: serviceId,
         instance_id: instanceId || "",
         start_ms: String(start_ms),
         end_ms: String(end_ms),
         q: search || "",
         limit: "300",
-      });
+      }, setLastTrace);
+      if (status >= 400) throw new Error(`logs_fetch_failed status=${status} ${JSON.stringify(data)}`);
 
       setRows(data.rows || []);
       setCursor({
@@ -110,7 +129,7 @@ export function RenderLogsPanel() {
     setBusy(true);
     setError(null);
     try {
-      const data = await apiGet<LogsResponse>("/api/admin/render/logs", {
+      const { status, data } = await apiGet<LogsResponse & { trace?: string }>("/api/admin/render/logs", {
         service_id: serviceId,
         instance_id: instanceId || "",
         start_ms: String(cursor.start_ms),
@@ -118,7 +137,8 @@ export function RenderLogsPanel() {
         q: search || "",
         limit: "300",
         page: "next",
-      });
+      }, setLastTrace);
+      if (status >= 400) throw new Error(`logs_fetch_failed status=${status} ${JSON.stringify(data)}`);
 
       setRows((prev) => [...prev, ...(data.rows || [])]);
       setCursor({
@@ -199,7 +219,15 @@ export function RenderLogsPanel() {
           <div className="font-mono text-xs break-all">{error}</div>
         </div>
       ) : null}
-      <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Render Logs</h2>
+      <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Render Logs</h2>{DEBUG_UI && (
+  <div style={{ marginTop: 8, padding: 8, border: "1px solid #ddd", borderRadius: 8, fontSize: 12 }}>
+    <div><b>debug</b></div>
+    <div>lastTrace: <code>{lastTrace || "-"}</code></div>
+    <div>services: {services.length} | instances: {instances.length} | rows: {rows.length}</div>
+    <div>serviceId: <code>{serviceId || "-"}</code> | instanceId: <code>{instanceId || "-"}</code></div>
+    {error && <div style={{ color: "crimson" }}>error: {error}</div>}
+  </div>
+)}
       <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
         <div style={{ display: "flex", flexDirection: "column" }}>
           <label style={{ fontSize: 12, opacity: 0.8 }}>Service</label>
