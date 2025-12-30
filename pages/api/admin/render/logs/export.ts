@@ -1,22 +1,23 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "../../../auth/[...nextauth]";
+import crypto from "crypto";
 import { Readable } from "stream";
 
-function mustEnv(name: string): string {
+function getEnv(name: string): string | undefined {
   const v = process.env[name];
-  if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
+  return v && v.trim() ? v.trim() : undefined;
 }
-
-function pickFirst(v: string | string[] | undefined): string | undefined {
-  if (!v) return undefined;
-  return Array.isArray(v) ? v[0] : v;
+function getAdminKey(): string | undefined {
+  return getEnv("VOZLIA_ADMIN_KEY") || getEnv("VOZLIA_ADMIN_API_KEY");
+}
+function getBaseUrl(): string | undefined {
+  return getEnv("VOZLIA_CONTROL_BASE_URL") || getEnv("VOZLIA_CONTROL_PLANE_URL");
 }
 
 export const config = {
   api: {
-    responseLimit: false, // allow streaming larger payloads
+    responseLimit: false,
   },
 };
 
@@ -26,62 +27,54 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   if (req.method !== "GET") return res.status(405).json({ error: "method_not_allowed" });
 
-  const service_id = pickFirst(req.query.service_id);
-  if (!service_id) return res.status(400).json({ error: "missing_service_id" });
+  const baseUrl = getBaseUrl();
+  const adminKey = getAdminKey();
+  if (!baseUrl) return res.status(500).json({ error: "missing_env", name: "VOZLIA_CONTROL_BASE_URL" });
+  if (!adminKey) return res.status(500).json({ error: "missing_env", name: "VOZLIA_ADMIN_KEY" });
 
-  const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
-  const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
+  const trace = (req.headers["x-vozlia-trace"] as string | undefined) || crypto.randomUUID();
+  res.setHeader("x-vozlia-trace", trace);
 
-  const params = new URLSearchParams();
-  params.set("service_id", service_id);
+  const debug = getEnv("VOZLIA_DEBUG_RENDER_LOGS") === "1";
 
-  const instance_id = pickFirst(req.query.instance_id);
-  if (instance_id) params.set("instance_id", instance_id);
+  const url = new URL(`${baseUrl.replace(/\/$/, "")}/admin/render/logs/export`);
+  for (const [k, v] of Object.entries(req.query || {})) {
+    if (typeof v === "string") url.searchParams.set(k, v);
+  }
 
-  const start_ms = pickFirst(req.query.start_ms);
-  const end_ms = pickFirst(req.query.end_ms);
-  const format = pickFirst(req.query.format);
-  const q = pickFirst(req.query.q);
-
-  if (start_ms) params.set("start_ms", start_ms);
-  if (end_ms) params.set("end_ms", end_ms);
-  if (format) params.set("format", format);
-  if (q) params.set("q", q);
-
-  const url = `${CONTROL_BASE}/admin/render/logs/export?${params.toString()}`;
-
+  const t0 = Date.now();
   try {
-    const upstream = await fetch(url, {
+    const upstream = await fetch(url.toString(), {
       method: "GET",
       headers: {
-        "X-Vozlia-Admin-Key": ADMIN_KEY,
-        Accept: "*/*",
+        "X-Vozlia-Admin-Key": adminKey,
+        "X-Vozlia-Trace": trace,
       },
     });
 
-    if (!upstream.ok) {
-      const t = await upstream.text().catch(() => "");
-      return res.status(502).json({ error: "upstream_error", status: upstream.status, detail: t.slice(0, 2000) });
+    const ms = Date.now() - t0;
+    if (debug) {
+      console.log(`[render-proxy][${trace}] GET /export -> ${upstream.status} ${ms}ms ct=${upstream.headers.get("content-type")}`);
     }
 
-    // Forward content headers
-    const contentType = upstream.headers.get("content-type") || "application/octet-stream";
-    res.setHeader("Content-Type", contentType);
+    res.statusCode = upstream.status;
 
-    const disposition = upstream.headers.get("content-disposition");
-    if (disposition) res.setHeader("Content-Disposition", disposition);
+    const ct = upstream.headers.get("content-type") || "text/plain";
+    res.setHeader("content-type", ct);
 
-    // Stream body
-    const body = upstream.body;
+    const cd = upstream.headers.get("content-disposition");
+    if (cd) res.setHeader("content-disposition", cd);
+
+    // Stream body through
+    const body = upstream.body as any;
     if (!body) {
-      const t = await upstream.text().catch(() => "");
-      return res.status(200).send(t);
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      res.end(buf);
+      return;
     }
 
-    // Node stream from web stream (works on Vercel Node runtime)
-    const nodeStream = Readable.fromWeb(body as any);
-    nodeStream.pipe(res);
+    Readable.fromWeb(body).pipe(res);
   } catch (err: any) {
-    return res.status(502).json({ error: "proxy_failed", detail: err?.message ?? String(err) });
+    return res.status(502).json({ error: "upstream_fetch_failed", trace, detail: err?.message ?? String(err) });
   }
 }

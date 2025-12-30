@@ -1,16 +1,17 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "../../../auth/[...nextauth]";
+import crypto from "crypto";
 
-function mustEnv(name: string): string {
+function getEnv(name: string): string | undefined {
   const v = process.env[name];
-  if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
+  return v && v.trim() ? v.trim() : undefined;
 }
-
-function pickFirst(v: string | string[] | undefined): string | undefined {
-  if (!v) return undefined;
-  return Array.isArray(v) ? v[0] : v;
+function getAdminKey(): string | undefined {
+  return getEnv("VOZLIA_ADMIN_KEY") || getEnv("VOZLIA_ADMIN_API_KEY");
+}
+function getBaseUrl(): string | undefined {
+  return getEnv("VOZLIA_CONTROL_BASE_URL") || getEnv("VOZLIA_CONTROL_PLANE_URL");
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -19,68 +20,59 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   if (req.method !== "GET") return res.status(405).json({ error: "method_not_allowed" });
 
-  const service_id = pickFirst(req.query.service_id);
-  if (!service_id) return res.status(400).json({ error: "missing_service_id" });
+  const baseUrl = getBaseUrl();
+  const adminKey = getAdminKey();
+  if (!baseUrl) return res.status(500).json({ error: "missing_env", name: "VOZLIA_CONTROL_BASE_URL" });
+  if (!adminKey) return res.status(500).json({ error: "missing_env", name: "VOZLIA_ADMIN_KEY" });
 
-  const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
-  const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
+  const trace = (req.headers["x-vozlia-trace"] as string | undefined) || crypto.randomUUID();
+  res.setHeader("x-vozlia-trace", trace);
 
-  const params = new URLSearchParams();
-  params.set("service_id", service_id);
+  const debug = getEnv("VOZLIA_DEBUG_RENDER_LOGS") === "1";
 
-  const instance_id = pickFirst(req.query.instance_id);
-  if (instance_id) params.set("instance_id", instance_id);
+  const service_id = String(req.query.service_id || "");
+  if (!service_id) return res.status(400).json({ error: "missing_service_id", trace });
 
-  // Optional: if not supplied, let control-plane default window
-  const start_ms = pickFirst(req.query.start_ms);
-  const end_ms = pickFirst(req.query.end_ms);
-  const limit = pickFirst(req.query.limit);
-  const q = pickFirst(req.query.q);
-  const page = pickFirst(req.query.page);
+  const url = new URL(`${baseUrl.replace(/\/$/, "")}/admin/render/logs`);
+  for (const [k, v] of Object.entries(req.query || {})) {
+    if (typeof v === "string") url.searchParams.set(k, v);
+  }
 
-  if (start_ms) params.set("start_ms", start_ms);
-  if (end_ms) params.set("end_ms", end_ms);
-  if (limit) params.set("limit", limit);
-  if (q) params.set("q", q);
-  if (page) params.set("page", page);
-
-  const url = `${CONTROL_BASE}/admin/render/logs?${params.toString()}`;
-
+  const t0 = Date.now();
   try {
-    const upstream = await fetch(url, {
+    const upstream = await fetch(url.toString(), {
       method: "GET",
       headers: {
-        "X-Vozlia-Admin-Key": ADMIN_KEY,
+        "X-Vozlia-Admin-Key": adminKey,
+        "X-Vozlia-Trace": trace,
         Accept: "application/json",
       },
     });
 
-    const rawText = await upstream.text();
+    const ms = Date.now() - t0;
     const contentType = upstream.headers.get("content-type") || "";
+    const rawText = await upstream.text();
 
-    if (!upstream.ok) {
-      return res.status(502).json({
-        error: "upstream_error",
-        status: upstream.status,
-        detail: rawText.slice(0, 2000),
-      });
+    if (debug) {
+      const preview = rawText.slice(0, 400).replace(/\s+/g, " ");
+      console.log(`[render-proxy][${trace}] GET /logs ${service_id} -> ${upstream.status} ${ms}ms ct=${contentType} body='${preview}'`);
     }
+
+    res.status(upstream.status);
+    res.setHeader("content-type", contentType || "application/json");
 
     if (contentType.includes("application/json")) {
-      const parsed = rawText ? JSON.parse(rawText) : {};
-      // Prefer pass-through; UI expects object with rows/has_more
-      return res.status(200).json(parsed);
+      try {
+        const parsed = rawText ? JSON.parse(rawText) : {};
+        if (parsed && typeof parsed === "object") return res.json({ ...(parsed as any), trace });
+        return res.json({ trace, raw: rawText });
+      } catch {
+        return res.status(502).json({ error: "bad_upstream_json", trace, preview: rawText.slice(0, 800) });
+      }
     }
 
-    // Unexpected content-type; wrap raw lines so UI at least shows something
-    return res.status(200).json({
-      service_id,
-      rows: rawText
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((line) => ({ raw: line })),
-    });
+    return res.send(rawText);
   } catch (err: any) {
-    return res.status(502).json({ error: "proxy_failed", detail: err?.message ?? String(err) });
+    return res.status(502).json({ error: "upstream_fetch_failed", trace, detail: err?.message ?? String(err) });
   }
 }
