@@ -19,8 +19,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (!id) return res.status(400).json({ error: "missing_service_id" });
 
   const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
-  const ADMIN_KEY = process.env.VOZLIA_ADMIN_KEY || process.env.VOZLIA_ADMIN_API_KEY;
-  if (!ADMIN_KEY) return res.status(500).json({ error: "missing_env", name: "VOZLIA_ADMIN_KEY" });
+  const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
 
   const url = `${CONTROL_BASE}/admin/render/services/${encodeURIComponent(id)}/instances`;
 
@@ -33,23 +32,25 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       },
     });
 
-const rawText = await upstream.text();
-const contentType = upstream.headers.get("content-type") || "application/json";
-res.status(upstream.status);
-res.setHeader("content-type", contentType);
+    const rawText = await upstream.text();
+    const contentType = upstream.headers.get("content-type") || "";
 
-// Normalize: UI expects { instances: [...] }
-if (contentType.includes("application/json")) {
-  try {
-    const parsed = rawText ? JSON.parse(rawText) : [];
-    if (Array.isArray(parsed)) return res.json({ instances: parsed });
-    return res.json(parsed);
-  } catch {
-    // ignore
-  }
-}
-return res.send(rawText);
+    if (!upstream.ok) {
+      return res.status(502).json({
+        error: "upstream_error",
+        status: upstream.status,
+        detail: rawText.slice(0, 2000),
+      });
+    }
+
+    if (contentType.includes("application/json")) {
+      const parsed = rawText ? JSON.parse(rawText) : [];
+      if (Array.isArray(parsed)) return res.status(200).json({ instances: parsed });
+      return res.status(200).json(parsed);
+    }
+
+    return res.status(200).send(rawText);
   } catch (err: any) {
-    return res.status(502).json({ detail: "Upstream request failed", error: err?.message ?? String(err) });
+    return res.status(502).json({ error: "proxy_failed", detail: err?.message ?? String(err) });
   }
 }
