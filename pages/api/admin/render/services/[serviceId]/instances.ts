@@ -1,11 +1,17 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "../../../../auth/[...nextauth]";
+import crypto from "crypto";
 
-function mustEnv(name: string): string {
+function getEnv(name: string): string | undefined {
   const v = process.env[name];
-  if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
+  return v && v.trim() ? v.trim() : undefined;
+}
+function getAdminKey(): string | undefined {
+  return getEnv("VOZLIA_ADMIN_KEY") || getEnv("VOZLIA_ADMIN_API_KEY");
+}
+function getBaseUrl(): string | undefined {
+  return getEnv("VOZLIA_CONTROL_BASE_URL") || getEnv("VOZLIA_CONTROL_PLANE_URL");
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -14,43 +20,61 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   if (req.method !== "GET") return res.status(405).json({ error: "method_not_allowed" });
 
-  const { serviceId } = req.query;
-  const id = Array.isArray(serviceId) ? serviceId[0] : serviceId;
-  if (!id) return res.status(400).json({ error: "missing_service_id" });
+  const baseUrl = getBaseUrl();
+  const adminKey = getAdminKey();
+  if (!baseUrl) return res.status(500).json({ error: "missing_env", name: "VOZLIA_CONTROL_BASE_URL" });
+  if (!adminKey) return res.status(500).json({ error: "missing_env", name: "VOZLIA_ADMIN_KEY" });
 
-  const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
-  const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
+  const trace = (req.headers["x-vozlia-trace"] as string | undefined) || crypto.randomUUID();
+  res.setHeader("x-vozlia-trace", trace);
 
-  const url = `${CONTROL_BASE}/admin/render/services/${encodeURIComponent(id)}/instances`;
+  const debug = getEnv("VOZLIA_DEBUG_RENDER_LOGS") === "1";
 
+  const serviceId = String(req.query.serviceId || "");
+  if (!serviceId) return res.status(400).json({ error: "missing_service_id", trace });
+
+  const url = `${baseUrl.replace(/\/$/, "")}/admin/render/services/${encodeURIComponent(serviceId)}/instances`;
+
+  const t0 = Date.now();
   try {
     const upstream = await fetch(url, {
       method: "GET",
       headers: {
-        "X-Vozlia-Admin-Key": ADMIN_KEY,
+        "X-Vozlia-Admin-Key": adminKey,
+        "X-Vozlia-Trace": trace,
         Accept: "application/json",
       },
     });
 
-    const rawText = await upstream.text();
+    const ms = Date.now() - t0;
     const contentType = upstream.headers.get("content-type") || "";
+    const rawText = await upstream.text();
 
-    if (!upstream.ok) {
-      return res.status(502).json({
-        error: "upstream_error",
-        status: upstream.status,
-        detail: rawText.slice(0, 2000),
-      });
+    if (debug) {
+      const preview = rawText.slice(0, 400).replace(/\s+/g, " ");
+      console.log(`[render-proxy][${trace}] GET /instances ${serviceId} -> ${upstream.status} ${ms}ms ct=${contentType} body='${preview}'`);
     }
+
+    res.status(upstream.status);
+    res.setHeader("content-type", contentType || "application/json");
 
     if (contentType.includes("application/json")) {
-      const parsed = rawText ? JSON.parse(rawText) : [];
-      if (Array.isArray(parsed)) return res.status(200).json({ instances: parsed });
-      return res.status(200).json(parsed);
+      try {
+        const parsed = rawText ? JSON.parse(rawText) : [];
+        if (Array.isArray(parsed)) return res.json({ instances: parsed, trace });
+        if (parsed && typeof parsed === "object") {
+          if (Array.isArray((parsed as any).instances)) return res.json({ ...(parsed as any), trace });
+          if ((parsed as any).id) return res.json({ instances: [parsed], trace });
+          return res.json({ ...(parsed as any), trace });
+        }
+        return res.json({ instances: [], trace });
+      } catch {
+        return res.status(502).json({ error: "bad_upstream_json", trace, preview: rawText.slice(0, 800) });
+      }
     }
 
-    return res.status(200).send(rawText);
+    return res.send(rawText);
   } catch (err: any) {
-    return res.status(502).json({ error: "proxy_failed", detail: err?.message ?? String(err) });
+    return res.status(502).json({ error: "upstream_fetch_failed", trace, detail: err?.message ?? String(err) });
   }
 }
