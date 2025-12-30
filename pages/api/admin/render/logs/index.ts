@@ -2,47 +2,38 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "../../../auth/[...nextauth]";
 
-function env(name: string): string | undefined {
+function mustEnv(name: string): string {
   const v = process.env[name];
-  return v && String(v).trim() ? String(v).trim() : undefined;
+  if (!v) throw new Error(`Missing env var: ${name}`);
+  return v;
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const session = await getServerSession(req, res, authOptions);
+  if (!session) return res.status(401).json({ error: "unauthorized" });
+
+  if (req.method !== "GET") return res.status(405).json({ error: "method_not_allowed" });
+
+  const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
+  const ADMIN_KEY = process.env.VOZLIA_ADMIN_KEY || process.env.VOZLIA_ADMIN_API_KEY;
+  if (!ADMIN_KEY) return res.status(500).json({ error: "missing_env", name: "VOZLIA_ADMIN_KEY" });
+
+  const { service_id, instance_id, start_ms, end_ms, q, limit, page } = req.query;
+
+  if (!service_id) return res.status(400).json({ error: "missing_service_id" });
+
+  const params = new URLSearchParams();
+  params.set("service_id", String(Array.isArray(service_id) ? service_id[0] : service_id));
+  if (instance_id) params.set("instance_id", String(Array.isArray(instance_id) ? instance_id[0] : instance_id));
+  if (start_ms) params.set("start_ms", String(Array.isArray(start_ms) ? start_ms[0] : start_ms));
+  if (end_ms) params.set("end_ms", String(Array.isArray(end_ms) ? end_ms[0] : end_ms));
+  if (q) params.set("q", String(Array.isArray(q) ? q[0] : q));
+  if (limit) params.set("limit", String(Array.isArray(limit) ? limit[0] : limit));
+  if (page) params.set("page", String(Array.isArray(page) ? page[0] : page));
+
+  const url = `${CONTROL_BASE}/admin/render/logs?${params.toString()}`;
+
   try {
-    const session = await getServerSession(req, res, authOptions);
-    if (!session) return res.status(401).json({ error: "unauthorized" });
-
-    if (req.method !== "GET") return res.status(405).json({ error: "method_not_allowed" });
-
-    const {
-      service_id,
-      instance_id,
-      start_ms,
-      end_ms,
-      q,
-      limit,
-      page,
-    } = req.query;
-
-    const sid = Array.isArray(service_id) ? service_id[0] : service_id;
-    if (!sid) return res.status(400).json({ error: "missing_service_id" });
-
-    const CONTROL_BASE = (env("VOZLIA_CONTROL_BASE_URL") || "").replace(/\/+$/, "");
-    const ADMIN_KEY = env("VOZLIA_ADMIN_KEY") || env("VOZLIA_ADMIN_API_KEY") || "";
-    if (!CONTROL_BASE) return res.status(500).json({ error: "missing_env", name: "VOZLIA_CONTROL_BASE_URL" });
-    if (!ADMIN_KEY) return res.status(500).json({ error: "missing_env", name: "VOZLIA_ADMIN_KEY" });
-
-    const params = new URLSearchParams();
-    params.set("service_id", sid);
-    if (instance_id) params.set("instance_id", Array.isArray(instance_id) ? instance_id[0] : String(instance_id));
-    if (start_ms) params.set("start_ms", Array.isArray(start_ms) ? start_ms[0] : String(start_ms));
-    if (end_ms) params.set("end_ms", Array.isArray(end_ms) ? end_ms[0] : String(end_ms));
-    if (q) params.set("q", Array.isArray(q) ? q[0] : String(q));
-    if (limit) params.set("limit", Array.isArray(limit) ? limit[0] : String(limit));
-    if (page) params.set("page", Array.isArray(page) ? page[0] : String(page));
-
-    const url = `${CONTROL_BASE}/admin/render/logs?${params.toString()}`;
-
     const upstream = await fetch(url, {
       method: "GET",
       headers: {
@@ -51,13 +42,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       },
     });
 
-    const ct = upstream.headers.get("content-type") || "application/json";
     const text = await upstream.text();
-
     res.status(upstream.status);
-    res.setHeader("content-type", ct);
+    res.setHeader("content-type", upstream.headers.get("content-type") || "application/json");
     return res.send(text);
   } catch (err: any) {
-    return res.status(502).json({ error: "upstream_failed", detail: err?.message ?? String(err) });
+    return res.status(502).json({ detail: "Upstream request failed", error: err?.message ?? String(err) });
   }
 }
