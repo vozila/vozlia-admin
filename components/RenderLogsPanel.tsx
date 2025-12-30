@@ -1,5 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 
+// Enable extra UI debug panel via NEXT_PUBLIC_DEBUG_UI=1 on Vercel
+const DEBUG_UI: boolean = process.env.NEXT_PUBLIC_DEBUG_UI === "1";
+
+
 function formatEastern(ts?: string) {
   if (!ts) return "";
 
