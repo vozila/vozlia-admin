@@ -47,7 +47,7 @@ type LogsResponse = {
 type RenderService = { id: string; name: string; type?: string };
 type RenderInstance = { id: string; name?: string; status?: string };
 
-type ExportFormat = "ndjson" | "csv";
+type ExportFormat = "csv";
 
 function nowMs() {
   return Date.now();
@@ -198,7 +198,61 @@ export function RenderLogsPanel() {
     }
   }
 
-  async function downloadLast(minutes: number, format: ExportFormat = "ndjson") {
+  async function loadAll() {
+    if (!serviceId) return;
+    if (!cursor?.has_more) return;
+    setBusy(true);
+    setError(null);
+    try {
+      let pages = 0;
+      let cur = cursor;
+
+      while (cur?.has_more) {
+        pages += 1;
+        if (pages > 50) {
+          // safety cap: prevents runaway loading for very large windows
+          setError("Stopped after 50 pages (safety cap). Narrow the time window or refine search.");
+          break;
+        }
+
+        const { status, data } = await apiGet<LogsResponse & { trace?: string }>(
+          "/api/admin/render/logs",
+          {
+            service_id: serviceId,
+            instance_id: instanceId || "",
+            start_ms: String(cur.start_ms),
+            end_ms: String(cur.end_ms),
+            q: search || "",
+            limit: "300",
+            page: "next",
+          },
+          setLastTrace
+        );
+
+        if (status >= 400) throw new Error(`logs_fetch_failed status=${status} ${JSON.stringify(data)}`);
+
+        setRows((prev) => [...prev, ...(data.rows || [])]);
+
+        const nextCur = {
+          start_ms: data.next_start_ms ?? data.start_ms,
+          end_ms: data.next_end_ms ?? data.end_ms,
+          has_more: !!data.has_more,
+        };
+        setCursor(nextCur);
+        cur = nextCur;
+
+        // Yield to the browser between pages
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+
+  async function downloadLast(minutes: number, format: ExportFormat = "csv") {
     if (!serviceId) return;
     setBusyDl(minutes);
     setError(null);
@@ -237,7 +291,8 @@ export function RenderLogsPanel() {
     }
   }
 
-  function downloadLoadedRows(format: ExportFormat = "ndjson") {
+  
+  function downloadLoadedRows() {
     if (!serviceId) return;
     if (!rows.length) {
       setError("No rows loaded to download.");
@@ -246,7 +301,7 @@ export function RenderLogsPanel() {
     setError(null);
 
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
-    const fname = `render-logs_${(serviceName || serviceId).replace(/[^a-zA-Z0-9_-]+/g, "_")}_table_${ts}.${format}`;
+    const fname = `render-logs_${(serviceName || serviceId).replace(/[^a-zA-Z0-9_-]+/g, "_")}_table_${ts}.csv`;
 
     const csvEscape = (v: any) => {
       const s = String(v ?? "");
@@ -255,33 +310,17 @@ export function RenderLogsPanel() {
       return needs ? `"${inner}"` : inner;
     };
 
-    let payload = "";
-    let mime = "application/x-ndjson";
-
-    if (format === "csv") {
-      mime = "text/csv";
-      payload += "ts,level,msg,raw\n";
-      for (const r of rows) {
-        payload += [
-          csvEscape(r.ts || ""),
-          csvEscape(r.level || ""),
-          csvEscape(r.msg || ""),
-          csvEscape(r.raw || ""),
-        ].join(",") + "\n";
-      }
-    } else {
-      // ndjson
-      for (const r of rows) {
-        payload += JSON.stringify({
-          ts: r.ts || null,
-          level: r.level || null,
-          msg: r.msg || null,
-          raw: r.raw,
-        }) + "\n";
-      }
+    let payload = "ts,level,msg,raw\n";
+    for (const r of rows) {
+      payload += [
+        csvEscape(r.ts || ""),
+        csvEscape(r.level || ""),
+        csvEscape(r.msg || ""),
+        csvEscape(r.raw || ""),
+      ].join(",") + "\n";
     }
 
-    const blob = new Blob([payload], { type: mime });
+    const blob = new Blob([payload], { type: "text/csv" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = fname;
@@ -407,7 +446,7 @@ export function RenderLogsPanel() {
           {[5, 15, 30, 60].map((m) => (
             <button
               key={m}
-              onClick={() => downloadLast(m, "ndjson")}
+              onClick={() => downloadLast(m, "csv")}
               disabled={!serviceId || busyDl !== null}
               style={{
                 padding: "10px 12px",
@@ -416,9 +455,9 @@ export function RenderLogsPanel() {
                 background: busyDl === m ? "#eee" : "#fff",
                 cursor: !serviceId || busyDl !== null ? "not-allowed" : "pointer",
               }}
-              title={`Download last ${m} minutes`}
+              title={`Download CSV for last ${m} minutes`}
             >
-              {busyDl === m ? "Downloading…" : `Download ${m}m`}
+              {busyDl === m ? "Downloading…" : `Download CSV ${m}m`}
             </button>
           ))}
         </div>
@@ -470,7 +509,7 @@ export function RenderLogsPanel() {
           <button
 
 
-                      onClick={() => downloadLoadedRows("ndjson")}
+                      onClick={() => downloadLoadedRows()}
 
 
                       disabled={!rows.length || busy || busyDl !== null}
@@ -507,6 +546,22 @@ export function RenderLogsPanel() {
 
 
                     </button>
+          <button
+            onClick={loadAll}
+            disabled={!cursor?.has_more || busy}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 10,
+              border: "1px solid #ccc",
+              background: !cursor?.has_more || busy ? "#eee" : "#fff",
+              cursor: !cursor?.has_more || busy ? "not-allowed" : "pointer",
+            }}
+            title="Load all pages for the selected window (may take a while)"
+          >
+            Load all
+          </button>
+
+
 
 
 
