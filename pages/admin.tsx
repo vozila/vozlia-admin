@@ -1,6 +1,7 @@
 import type { GetServerSidePropsContext } from "next";
 import { useEffect, useMemo, useState } from "react";
 import { useSession } from "next-auth/react";
+import { RenderLogsPanel } from "../components/RenderLogsPanel";
 
 type EmailAccount = {
   id: string;
@@ -337,6 +338,9 @@ export default function AdminPage() {
           Tip: After connecting multiple Gmail accounts, leave <code>gmail_enabled_account_ids</code> empty to treat all active accounts as enabled.
         </div>
       </section>
+      {/* Render Logs */}
+      <RenderLogsPanel />
+
     </div>
   );
 }
