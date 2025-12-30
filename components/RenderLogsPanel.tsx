@@ -193,6 +193,12 @@ export function RenderLogsPanel() {
 
   return (
     <section style={{ marginTop: 24, padding: 16, border: "1px solid #ddd", borderRadius: 12 }}>
+      {error ? (
+        <div className="mb-2 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+          <div className="font-semibold">Logs panel error</div>
+          <div className="font-mono text-xs break-all">{error}</div>
+        </div>
+      ) : null}
       <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Render Logs</h2>
       <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
         <div style={{ display: "flex", flexDirection: "column" }}>
