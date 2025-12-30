@@ -52,6 +52,25 @@ function minutesAgoMs(m: number) {
   return Date.now() - m * 60 * 1000;
 }
 
+
+const WINDOW_OPTIONS: { label: string; minutes: number }[] = [
+  { label: "Last 5 minutes", minutes: 5 },
+  { label: "Last 15 minutes", minutes: 15 },
+  { label: "Last 30 minutes", minutes: 30 },
+  { label: "Last 60 minutes", minutes: 60 },
+
+  { label: "Last 6 hours", minutes: 6 * 60 },
+  { label: "Last 12 hours", minutes: 12 * 60 },
+  { label: "Last 24 hours", minutes: 24 * 60 },
+  { label: "Last 1 day", minutes: 24 * 60 },
+
+  { label: "Last 3 days", minutes: 3 * 24 * 60 },
+  { label: "Last 1 week", minutes: 7 * 24 * 60 },
+  // Approximate month = 30 days
+  { label: "Last 1 month", minutes: 30 * 24 * 60 },
+];
+
+
 function formatFileName(serviceName: string, minutes: number, fmt: ExportFormat) {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   return `render-logs_${serviceName || "service"}_${minutes}min_${ts}.${fmt}`;
@@ -214,6 +233,61 @@ export function RenderLogsPanel() {
     }
   }
 
+  function downloadLoadedRows(format: ExportFormat = "ndjson") {
+    if (!serviceId) return;
+    if (!rows.length) {
+      setError("No rows loaded to download.");
+      return;
+    }
+    setError(null);
+
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const fname = `render-logs_${(serviceName || serviceId).replace(/[^a-zA-Z0-9_-]+/g, "_")}_table_${ts}.${format}`;
+
+    const csvEscape = (v: any) => {
+      const s = String(v ?? "");
+      const needs = /[",\n\r]/.test(s);
+      const inner = s.replace(/"/g, '""');
+      return needs ? `"${inner}"` : inner;
+    };
+
+    let payload = "";
+    let mime = "application/x-ndjson";
+
+    if (format === "csv") {
+      mime = "text/csv";
+      payload += "ts,level,msg,raw\n";
+      for (const r of rows) {
+        payload += [
+          csvEscape(r.ts || ""),
+          csvEscape(r.level || ""),
+          csvEscape(r.msg || ""),
+          csvEscape(r.raw || ""),
+        ].join(",") + "\n";
+      }
+    } else {
+      // ndjson
+      for (const r of rows) {
+        payload += JSON.stringify({
+          ts: r.ts || null,
+          level: r.level || null,
+          msg: r.msg || null,
+          raw: r.raw,
+        }) + "\n";
+      }
+    }
+
+    const blob = new Blob([payload], { type: mime });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+  }
+
+
   useEffect(() => {
     loadServices().catch((e) => setError(e?.message ?? String(e)));
   }, []);
@@ -292,12 +366,11 @@ export function RenderLogsPanel() {
             disabled={!serviceId}
             style={{ padding: 8, borderRadius: 8, border: "1px solid #ccc" }}
           >
-            {[5, 15, 30, 60].map((m) => (
-              <option key={m} value={m}>
-                Last {m} minutes
+            {WINDOW_OPTIONS.map((opt) => (
+              <option key={opt.label} value={opt.minutes}>
+                {opt.label}
               </option>
-            ))}
-          </select>
+            ))}</select>
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", minWidth: 260 }}>
@@ -389,7 +462,50 @@ export function RenderLogsPanel() {
           </table>
         </div>
 
-        <div style={{ padding: 10, display: "flex", justifyContent: "flex-end" }}>
+        <div style={{ padding: 10, display: "flex", justifyContent: "flex-end", gap: 10, alignItems: "center" }}>
+          <button
+
+
+                      onClick={() => downloadLoadedRows("ndjson")}
+
+
+                      disabled={!rows.length || busy || busyDl !== null}
+
+
+                      style={{
+
+
+                        padding: "10px 14px",
+
+
+                        borderRadius: 10,
+
+
+                        border: "1px solid #ccc",
+
+
+                        background: !rows.length || busy || busyDl !== null ? "#eee" : "#fff",
+
+
+                        cursor: !rows.length || busy || busyDl !== null ? "not-allowed" : "pointer",
+
+
+                      }}
+
+
+                      title={rows.length ? `Download ${rows.length} loaded rows` : "No rows loaded"}
+
+
+                    >
+
+
+                      Download table
+
+
+                    </button>
+
+
+
           <button
             onClick={loadMore}
             disabled={!cursor?.has_more || busy}
