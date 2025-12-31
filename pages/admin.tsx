@@ -349,31 +349,86 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
   async function saveWiredSettings() {
     setSaving(true);
     setError(null);
+
+    // Normalize phrase lists from textarea inputs (one phrase per line)
+    const gmailEngagementPhrases = (skillCfg.gmail_summaries.engagementPrompt || "")
+      .split("
+")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const memoryPhrases = (memoryEngagementPrompt || "")
+      .split("
+")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    // Control-plane PATCH payload (modular skills_config + memory toggles)
+    const payload = {
+      agent_greeting: settings.agent_greeting,
+      realtime_prompt_addendum: settings.realtime_prompt_addendum,
+
+      // Existing wired Gmail toggles + inbox selection
+      gmail_summary_enabled: settings.gmail_summary_enabled,
+      gmail_account_id: settings.gmail_account_id,
+      gmail_enabled_account_ids: settings.gmail_enabled_account_ids,
+
+      // NEW: Modular per-skill config (gmail_summary for now)
+      skills_config: {
+        gmail_summary: {
+          enabled: !!settings.gmail_summary_enabled,
+          add_to_greeting: !!skillCfg.gmail_summaries.addToGreeting,
+          engagement_phrases: gmailEngagementPhrases,
+          llm_prompt: skillCfg.gmail_summaries.llmPrompt || "",
+        },
+      },
+
+      // NEW: Memory wiring
+      shortterm_memory_enabled: !!settings.shortterm_memory_enabled,
+      longterm_memory_enabled: !!settings.longterm_memory_enabled,
+      memory_engagement_phrases: memoryPhrases,
+    };
+
     try {
       const res = await fetch("/api/admin/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agent_greeting: settings.agent_greeting,
-          realtime_prompt_addendum: settings.realtime_prompt_addendum,
-          gmail_summary_enabled: settings.gmail_summary_enabled,
-          gmail_account_id: settings.gmail_account_id,
-          gmail_enabled_account_ids: settings.gmail_enabled_account_ids,
-        }),
+        body: JSON.stringify(payload),
       });
+
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to save settings");
+
       setSettings(data);
+
+      // Re-sync Gmail skill fields from server (defensive: supports older responses)
+      const skills =
+        data && typeof data === "object" && data.skills_config && typeof data.skills_config === "object"
+          ? data.skills_config
+          : {};
+      const gmailSkill = (skills as any).gmail_summary || {};
+
       setSkillCfg((cur) => ({
         ...cur,
-        gmail_summaries: { ...cur.gmail_summaries, enabled: !!data.gmail_summary_enabled },
+        gmail_summaries: {
+          ...cur.gmail_summaries,
+          enabled: !!data.gmail_summary_enabled,
+          addToGreeting: !!gmailSkill.add_to_greeting,
+          engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("
+") : "",
+          llmPrompt: typeof gmailSkill.llm_prompt === "string" ? gmailSkill.llm_prompt : "",
+        },
       }));
+
+      setMemoryEngagementPrompt(Array.isArray(data.memory_engagement_phrases) ? data.memory_engagement_phrases.join("
+") : "");
     } catch (e: unknown) {
       setError(String((e as any)?.message ?? e));
     } finally {
       setSaving(false);
     }
   }
+
 
   async function patchAccount(id: string, patch: Partial<EmailAccount>) {
     setError(null);
@@ -551,11 +606,14 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                   />
 
                   <TextField
-                    label="Engagement Prompt"
+                    label="Engagement Prompt (phrases)"
                     value={skillCfg[activeSkill].engagementPrompt}
                     onChange={(v) => setSkillCfg((cur) => ({ ...cur, [activeSkill]: { ...cur[activeSkill], engagementPrompt: v } }))}
-                    placeholder='Example: "If the caller asks about email, offer summaries."'
-                    helper="Concept"
+                    placeholder={"One phrase per line, e.g.
+email summaries
+summarize my inbox"}
+                    helper={activeSkill === "gmail_summaries" ? "Wired: phrases that trigger routing to Gmail Summaries." : "Concept (not wired yet)"}
+                    multiline
                   />
 
                   <TextField
@@ -812,14 +870,14 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 
           <SectionRow
   title="Agent Memory"
-  subtitle="Short-term + long-term toggles, engagement prompt, and Memory Bank (concept DB view)."
+  subtitle="Short-term + long-term toggles and engagement phrases (wired). Memory Bank table still concept."
   open={open.agentMemory}
   onToggle={() => setOpen((p) => ({ ...p, agentMemory: !p.agentMemory }))}
 >
   <div className="panel">
     <div className="panelTitle">Memory</div>
     <div className="panelSub">
-      These controls will be wired to the control plane next. Today they act as concept UI and do not affect runtime unless your backend already reads these settings.
+      These controls are wired to the control plane. Save to apply them at runtime.
     </div>
 
     <div className="form" style={{ marginTop: 12 }}>
@@ -827,27 +885,37 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
         checked={!!settings.shortterm_memory_enabled}
         onChange={(v) => setSettings((p: any) => ({ ...p, shortterm_memory_enabled: v }))}
         label="Enable Short-Term Memory"
-        helper="Concept now; wiring comes next."
+        helper="Wired: stored in control-plane settings."
       />
 
       <Switch
         checked={!!settings.longterm_memory_enabled}
         onChange={(v) => setSettings((p: any) => ({ ...p, longterm_memory_enabled: v }))}
         label="Enable Long-Term Memory"
-        helper="Concept now; wiring comes next."
+        helper="Wired: stored in control-plane settings."
       />
 
       <TextField
-        label="Engagement Prompt"
+        label="Engagement Prompt (phrases)"
         value={memoryEngagementPrompt}
         onChange={setMemoryEngagementPrompt}
-        placeholder='Example: "If the caller mentions personal preferences, store them and recall later."'
-        helper="Phrases / routing hints to tell the FSM when to consult long-term memory. (Concept)"
+        placeholder={"One phrase per line, e.g.
+remember this
+store that in memory"}
+        helper="Wired: phrases that will trigger the FSM/router to consult memory."
+        multiline
       />
+    </div>
+
+    <div className="actions" style={{ marginTop: 12 }}>
+      <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
+        {saving ? "Saving…" : "Save Memory Settings"}
+      </button>
     </div>
   </div>
 
   <div className="panel" style={{ marginTop: 14 }}>
+
     <div className="panelTitle">Memory Bank</div>
     <div className="panelSub">Search and browse long-term memory entries. (Concept display; API wiring next.)</div>
 
