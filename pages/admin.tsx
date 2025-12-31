@@ -1,5 +1,5 @@
 import type { GetServerSidePropsContext } from "next";
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSession } from "next-auth/react";
 import { RenderLogsPanel } from "../components/RenderLogsPanel";
 
@@ -11,24 +11,13 @@ type EmailAccount = {
   display_name?: string | null;
   is_primary: boolean;
   is_active: boolean;
-  created_at?: string;
-  updated_at?: string;
 };
 
-type SkillKey =
-  | "gmail_summaries"
-  | "sms"
-  | "calendar"
-  | "weather"
-  | "investment_reporting"
-  | "web_search";
+type SkillKey = "gmail_summaries" | "sms" | "calendar" | "web_search" | "weather" | "investment_reporting";
 
-type Tile = {
-  key: SkillKey;
-  title: string;
-  description: string;
-  enabled: boolean;
-};
+type TemplateItem =
+  | { kind: "skill"; key: SkillKey }
+  | { kind: "playbook"; id: string };
 
 type Playbook = {
   id: string;
@@ -41,163 +30,35 @@ type Template = {
   id: string;
   name: string;
   enabled: boolean;
-  sequence: Array<{ kind: "skill"; key: SkillKey } | { kind: "playbook"; id: string }>;
+  sequence: TemplateItem[];
 };
 
-function IconPlus({ open }: { open: boolean }) {
-  return (
-    <span
-      aria-hidden
-      style={{
-        width: 24,
-        height: 24,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        borderRadius: 10,
-        border: "1px solid rgba(15, 23, 42, 0.12)",
-        background: "rgba(255,255,255,0.9)",
-        color: "#0F172A",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        fontSize: 16,
-        lineHeight: 1,
-        boxShadow: "0 12px 26px rgba(15,23,42,0.08)",
-      }}
-    >
-      {open ? "–" : "+"}
-    </span>
-  );
-}
+type DragPayload =
+  | { type: "skill"; key: SkillKey }
+  | { type: "playbook"; id: string };
 
-function Pill({ children }: { children: ReactNode }) {
-  return (
-    <span
-      style={{
-        fontSize: 12,
-        padding: "6px 10px",
-        borderRadius: 999,
-        border: "1px solid rgba(15, 23, 42, 0.12)",
-        background: "rgba(6,182,212,0.12)",
-        color: "#0F172A",
-        fontWeight: 800,
-        whiteSpace: "nowrap",
-      }}
-    >
-      {children}
-    </span>
-  );
-}
-
-function Switch({
-  checked,
-  onChange,
-  disabled,
-  label,
-  helper,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  disabled?: boolean;
-  label: string;
-  helper?: string;
-}) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontWeight: 800, color: "#0F172A" }}>{label}</div>
-        {helper ? <div style={{ marginTop: 4, fontSize: 12, color: "#64748B" }}>{helper}</div> : null}
-      </div>
-
-      <button
-        type="button"
-        onClick={() => !disabled && onChange(!checked)}
-        aria-pressed={checked}
-        disabled={disabled}
-        style={{
-          width: 46,
-          height: 28,
-          borderRadius: 999,
-          border: "1px solid rgba(15, 23, 42, 0.12)",
-          background: checked ? "rgba(6,182,212,0.22)" : "rgba(255,255,255,0.9)",
-          position: "relative",
-          cursor: disabled ? "not-allowed" : "pointer",
-          opacity: disabled ? 0.5 : 1,
-          boxShadow: "0 12px 26px rgba(15,23,42,0.08)",
-          flex: "0 0 auto",
-        }}
-      >
-        <span
-          style={{
-            position: "absolute",
-            top: 3,
-            left: checked ? 24 : 4,
-            width: 20,
-            height: 20,
-            borderRadius: 999,
-            background: checked ? "#06B6D4" : "#0F172A",
-            transition: "left 120ms ease",
-          }}
-        />
-      </button>
-    </div>
-  );
-}
-
-function TextField({
-  label,
-  value,
-  onChange,
-  placeholder,
-  helper,
-  multiline,
-  disabled,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  helper?: string;
-  multiline?: boolean;
-  disabled?: boolean;
-}) {
-  const commonStyle: CSSProperties = {
-    width: "100%",
-    padding: 12,
-    borderRadius: 14,
-    border: "1px solid rgba(15, 23, 42, 0.12)",
-    background: "rgba(255,255,255,0.92)",
-    color: "#0F172A",
-    outline: "none",
-    boxShadow: "0 12px 26px rgba(15,23,42,0.08)",
-    opacity: disabled ? 0.6 : 1,
-  };
-
-  return (
-    <div>
-      <div style={{ fontWeight: 800, color: "#0F172A" }}>{label}</div>
-      {helper ? <div style={{ marginTop: 4, fontSize: 12, color: "#64748B" }}>{helper}</div> : null}
-      <div style={{ marginTop: 8 }}>
-        {multiline ? (
-          <textarea
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            rows={4}
-            placeholder={placeholder}
-            style={commonStyle}
-            disabled={disabled}
-          />
-        ) : (
-          <input
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder={placeholder}
-            style={commonStyle}
-            disabled={disabled}
-          />
-        )}
-      </div>
-    </div>
-  );
+function safeParseDragPayload(raw: string): DragPayload | null {
+  try {
+    const obj = JSON.parse(raw) as Record<string, unknown>;
+    const type = obj["type"];
+    if (type === "skill") {
+      const key = obj["key"];
+      if (typeof key === "string") {
+        // Narrow to SkillKey
+        const allowed: SkillKey[] = ["gmail_summaries", "sms", "calendar", "web_search", "weather", "investment_reporting"];
+        if (allowed.includes(key as SkillKey)) return { type: "skill", key: key as SkillKey };
+      }
+      return null;
+    }
+    if (type === "playbook") {
+      const id = obj["id"];
+      if (typeof id === "string" && id.length > 0) return { type: "playbook", id };
+      return null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function SectionRow({
@@ -216,331 +77,214 @@ function SectionRow({
   rightSlot?: ReactNode;
 }) {
   return (
-    <div
-      style={{
-        borderRadius: 20,
-        border: "1px solid rgba(15, 23, 42, 0.12)",
-        background: "rgba(255,255,255,0.8)",
-        boxShadow: "0 18px 60px rgba(15,23,42,0.08)",
-        overflow: "hidden",
-      }}
-    >
-      <button
-        type="button"
-        onClick={onToggle}
-        style={{
-          width: "100%",
-          textAlign: "left",
-          padding: 16,
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          background: "transparent",
-          border: "none",
-          cursor: "pointer",
-        }}
-      >
-        <IconPlus open={open} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ color: "#0F172A", fontWeight: 900, fontSize: 16 }}>{title}</div>
-          <div style={{ color: "#64748B", fontSize: 13, marginTop: 2, lineHeight: 1.35 }}>{subtitle}</div>
+    <div className="sectionShell">
+      <button type="button" className="sectionHeader" onClick={onToggle}>
+        <span className="plus">{open ? "–" : "+"}</span>
+        <div className="sectionText">
+          <div className="sectionTitle">{title}</div>
+          <div className="sectionSub">{subtitle}</div>
         </div>
-        {rightSlot ? <div style={{ flex: "0 0 auto" }}>{rightSlot}</div> : null}
+        {rightSlot ? <div className="sectionRight">{rightSlot}</div> : null}
       </button>
+      {open ? <div className="sectionBody">{children}</div> : null}
+    </div>
+  );
+}
 
-      {open ? (
-        <div style={{ padding: 16, paddingTop: 0 }}>
-          <div style={{ height: 1, background: "rgba(15,23,42,0.08)", marginBottom: 16 }} />
-          {children}
-        </div>
-      ) : null}
+function Switch({
+  checked,
+  onChange,
+  label,
+  helper,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  helper?: string;
+}) {
+  return (
+    <div className="switchRow">
+      <div className="switchText">
+        <div className="switchLabel">{label}</div>
+        {helper ? <div className="switchHelper">{helper}</div> : null}
+      </div>
+      <button type="button" className={`switch ${checked ? "on" : "off"}`} onClick={() => onChange(!checked)} aria-pressed={checked}>
+        <span className="knob" />
+      </button>
+    </div>
+  );
+}
+
+function TextField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  helper,
+  multiline,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  helper?: string;
+  multiline?: boolean;
+}) {
+  return (
+    <div className="field">
+      <div className="fieldLabel">{label}</div>
+      {helper ? <div className="fieldHelper">{helper}</div> : null}
+      {multiline ? (
+        <textarea className="input" rows={4} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
+      ) : (
+        <input className="input" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
+      )}
     </div>
   );
 }
 
 function SkillTile({
-  tile,
+  title,
+  desc,
+  enabled,
   active,
   onClick,
-  onDragStart,
+  draggableKey,
 }: {
-  tile: Tile;
+  title: string;
+  desc: string;
+  enabled: boolean;
   active: boolean;
   onClick: () => void;
-  onDragStart?: (key: SkillKey) => void;
+  draggableKey: SkillKey;
 }) {
   return (
     <button
       type="button"
+      className={`tile ${active ? "active" : ""}`}
       onClick={onClick}
       draggable
       onDragStart={(e) => {
-        e.dataTransfer.setData("text/plain", `skill:${tile.key}`);
-        e.dataTransfer.effectAllowed = "move";
-        onDragStart?.(tile.key);
-      }}
-      style={{
-        textAlign: "left",
-        padding: 14,
-        borderRadius: 18,
-        border: active ? "1px solid rgba(6,182,212,0.55)" : "1px solid rgba(15,23,42,0.12)",
-        background: "rgba(255,255,255,0.92)",
-        color: "#0F172A",
-        cursor: "pointer",
-        boxShadow: "0 18px 60px rgba(15,23,42,0.08)",
+        const payload: DragPayload = { type: "skill", key: draggableKey };
+        e.dataTransfer.setData("application/json", JSON.stringify(payload));
+        e.dataTransfer.effectAllowed = "copyMove";
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <div style={{ fontWeight: 950 }}>{tile.title}</div>
-        <span
-          style={{
-            fontSize: 12,
-            padding: "4px 10px",
-            borderRadius: 999,
-            border: "1px solid rgba(15, 23, 42, 0.12)",
-            background: tile.enabled ? "rgba(6,182,212,0.14)" : "rgba(100,116,139,0.10)",
-            color: "#0F172A",
-            fontWeight: 800,
-          }}
-        >
-          {tile.enabled ? "Enabled" : "Disabled"}
-        </span>
+      <div className="tileTop">
+        <div className="tileTitle">{title}</div>
+        <span className={`pill ${enabled ? "pillOn" : "pillOff"}`}>{enabled ? "Enabled" : "Disabled"}</span>
       </div>
-      <div style={{ marginTop: 6, color: "#64748B", fontSize: 13, lineHeight: 1.35 }}>{tile.description}</div>
-      <div style={{ marginTop: 10, fontSize: 12, color: "#64748B" }}>
-        Drag into a playbook or template • Click to configure
-      </div>
+      <div className="tileDesc">{desc}</div>
     </button>
   );
 }
 
-function DragList({
+function DropZone({
   title,
   subtitle,
-  items,
-  itemLabel,
-  onMove,
-  onDropAppend,
-  allowDropKinds,
-  rightSlot,
+  onDropPayload,
+  children,
 }: {
   title: string;
   subtitle: string;
-  items: string[];
-  itemLabel: (id: string) => string;
-  onMove: (fromIdx: number, toIdx: number) => void;
-  onDropAppend: (payload: { kind: "skill"; key: SkillKey } | { kind: "playbook"; id: string }) => void;
-  allowDropKinds: Array<"skill" | "playbook">;
-  rightSlot?: ReactNode;
+  onDropPayload: (p: DragPayload) => void;
+  children: ReactNode;
 }) {
-  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-
-  function onDragOver(e: React.DragEvent) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-  }
-
-  function parsePayload(data: string): { kind: "skill"; key: SkillKey } | { kind: "playbook"; id: string } | null {
-    if (!data) return null;
-    const [kind, id] = data.split(":", 2);
-    if (kind === "skill" && allowDropKinds.includes("skill")) {
-      return { kind: "skill", key: id as SkillKey };
-    }
-    if (kind === "playbook" && allowDropKinds.includes("playbook")) {
-      return { kind: "playbook", id };
-    }
-    return null;
-  }
-
+  const [over, setOver] = useState(false);
   return (
     <div
-      style={{
-        borderRadius: 18,
-        border: "1px solid rgba(15,23,42,0.12)",
-        background: "rgba(255,255,255,0.92)",
-        boxShadow: "0 18px 60px rgba(15,23,42,0.08)",
-        overflow: "hidden",
+      className={`dropZone ${over ? "over" : ""}`}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setOver(true);
       }}
-      onDragOver={onDragOver}
+      onDragLeave={() => setOver(false)}
       onDrop={(e) => {
         e.preventDefault();
-        const p = parsePayload(e.dataTransfer.getData("text/plain"));
-        if (!p) return;
-        onDropAppend(p);
-        setHoverIdx(null);
+        setOver(false);
+        const raw = e.dataTransfer.getData("application/json");
+        const payload = safeParseDragPayload(raw);
+        if (payload) onDropPayload(payload);
       }}
     >
-      <div style={{ padding: 14, display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+      <div className="dropHead">
         <div>
-          <div style={{ fontWeight: 950, color: "#0F172A" }}>{title}</div>
-          <div style={{ marginTop: 4, fontSize: 12, color: "#64748B", lineHeight: 1.35 }}>{subtitle}</div>
+          <div className="dropTitle">{title}</div>
+          <div className="dropSub">{subtitle}</div>
         </div>
-        {rightSlot ? <div style={{ flex: "0 0 auto" }}>{rightSlot}</div> : null}
       </div>
-
-      <div style={{ padding: 14, paddingTop: 0, display: "grid", gap: 10 }}>
-        {items.length === 0 ? (
-          <div
-            style={{
-              borderRadius: 16,
-              border: "1px dashed rgba(15,23,42,0.18)",
-              padding: 14,
-              color: "#64748B",
-              background: "rgba(6,182,212,0.06)",
-            }}
-          >
-            Drop items here…
-          </div>
-        ) : null}
-
-        {items.map((id, idx) => (
-          <div
-            key={`${id}-${idx}`}
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData("text/plain", id);
-              e.dataTransfer.effectAllowed = "move";
-            }}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setHoverIdx(idx);
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              const from = e.dataTransfer.getData("text/plain");
-              const fromIdx = items.findIndex((x, i) => `${x}` === from && i !== idx) === -1 ? items.indexOf(from) : items.indexOf(from);
-              // We only support reordering within this list when dragging list items (same payload).
-              const exactFromIdx = items.findIndex((x, i) => `${x}` === from && i !== idx) ?? items.indexOf(from);
-              const f = items.indexOf(from);
-              if (f >= 0 && f !== idx) onMove(f, idx);
-              setHoverIdx(null);
-            }}
-            style={{
-              padding: 12,
-              borderRadius: 16,
-              border: hoverIdx === idx ? "1px solid rgba(6,182,212,0.55)" : "1px solid rgba(15,23,42,0.10)",
-              background: "rgba(255,255,255,0.98)",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: 12,
-              cursor: "grab",
-            }}
-            title="Drag to reorder"
-          >
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontWeight: 900, color: "#0F172A" }}>{itemLabel(id)}</div>
-              <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>Step {idx + 1}</div>
-            </div>
-            <div style={{ fontSize: 12, color: "#64748B" }}>⇅</div>
-          </div>
-        ))}
-      </div>
+      <div className="dropBody">{children}</div>
     </div>
   );
 }
 
-function moveItem<T>(arr: T[], fromIdx: number, toIdx: number): T[] {
-  const next = arr.slice();
-  const [x] = next.splice(fromIdx, 1);
-  next.splice(toIdx, 0, x);
-  return next;
-}
-
 export default function AdminPage() {
   const { data: session } = useSession();
+  const primaryEmail = (session?.user?.email as string | undefined) || "";
 
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const [settings, setSettings] = useState<any>({});
   const [accounts, setAccounts] = useState<EmailAccount[]>([]);
-  const [accountsLoading, setAccountsLoading] = useState<boolean>(true);
+  const [accountsLoading, setAccountsLoading] = useState(true);
 
-  // Concept-only state (not yet wired)
-  const [activeSkill, setActiveSkill] = useState<SkillKey | null>(null);
-
-  // Gmail skill concept fields
-  const [gmailEngagementPrompt, setGmailEngagementPrompt] = useState<string>("");
-  const [gmailLlmPrompt, setGmailLlmPrompt] = useState<string>("");
-  const [gmailAddToGreeting, setGmailAddToGreeting] = useState<boolean>(false);
-
-  // Admin-configurable greeting priority list (concept)
-  const [greetingPriority, setGreetingPriority] = useState<SkillKey[]>(["gmail_summaries", "sms", "calendar", "weather", "investment_reporting", "web_search"]);
-
-  // Playbooks & Templates (concept)
-  const [playbooks, setPlaybooks] = useState<Playbook[]>([
-    { id: "pb_sales_intake", name: "Sales Intake", enabled: true, steps: ["sms"] },
-    { id: "pb_owner_update", name: "Owner Update", enabled: false, steps: ["gmail_summaries"] },
-  ]);
-
-  const [templates, setTemplates] = useState<Template[]>([
-    {
-      id: "tpl_default",
-      name: "Default Program",
-      enabled: true,
-      sequence: [{ kind: "playbook", id: "pb_sales_intake" }, { kind: "skill", key: "gmail_summaries" }],
-    },
-  ]);
-
-  const [selectedPlaybookId, setSelectedPlaybookId] = useState<string>("pb_sales_intake");
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("tpl_default");
-
-  const [memoryEngagementPrompt, setMemoryEngagementPrompt] = useState<string>("");
-  const [memorySearch, setMemorySearch] = useState<string>("");
-
-  const [chitchatDelaySec, setChitchatDelaySec] = useState<string>("2.0");
-
-  const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
-    REALTIME_LOG_DELTAS: false,
-    REALTIME_LOG_TEXT: false,
-    REALTIME_LOG_ALL_EVENTS: false,
-    OBS_ENABLED: false,
-    OBS_LOG_JSON: false,
-  });
-
+  // Concept-only state
   const [open, setOpen] = useState<Record<string, boolean>>({
     skills: false,
     playbooks: false,
     templates: false,
-    agentMemory: false,
+    memory: false,
     chitchat: false,
     logging: false,
-    core: false,
     email: false,
     renderLogs: false,
   });
 
-  const primaryEmail = (session?.user?.email as string | undefined) || "";
+  const [activeSkill, setActiveSkill] = useState<SkillKey | null>(null);
 
-  const tiles: Tile[] = useMemo(() => {
-    const gmailEnabled = !!settings.gmail_summary_enabled;
-    return [
-      { key: "gmail_summaries", title: "Gmail Summaries", description: "Summarize inboxes and answer “what did I miss?”", enabled: gmailEnabled },
-      { key: "sms", title: "SMS", description: "Send follow-ups, confirmations, and owner notifications.", enabled: true },
-      { key: "calendar", title: "Calendar", description: "Read availability and capture scheduling intent.", enabled: false },
-      { key: "weather", title: "Weather", description: "Weather lookups based on tenant default location.", enabled: false },
-      { key: "investment_reporting", title: "Investment Reporting", description: "Ticker-based reporting using tenant defaults.", enabled: false },
-      { key: "web_search", title: "Web Search", description: "Fetch fresh info when needed (tools capability).", enabled: false },
-    ];
-  }, [settings.gmail_summary_enabled]);
+  // Skill config (concept fields)
+  const [skillCfg, setSkillCfg] = useState<Record<SkillKey, { enabled: boolean; addToGreeting: boolean; engagementPrompt: string; llmPrompt: string }>>({
+    gmail_summaries: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    sms: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    calendar: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    web_search: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    weather: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    investment_reporting: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
+  });
 
-  function skillTitle(k: SkillKey) {
-    return tiles.find((t) => t.key === k)?.title || k;
-  }
+  // Greeting priority list (admin configurable)
+  const [greetingPriority, setGreetingPriority] = useState<SkillKey[]>([
+    "gmail_summaries",
+    "sms",
+    "calendar",
+    "web_search",
+    "weather",
+    "investment_reporting",
+  ]);
 
-  function playbookName(id: string) {
-    return playbooks.find((p) => p.id === id)?.name || id;
-  }
+  // Playbooks/Templates concept models
+  const [playbooks, setPlaybooks] = useState<Playbook[]>([
+    { id: "pb-1", name: "New Lead Intake", enabled: true, steps: ["gmail_summaries"] },
+    { id: "pb-2", name: "After-hours Info", enabled: true, steps: ["weather"] },
+  ]);
+  const [selectedPlaybookId, setSelectedPlaybookId] = useState<string>("pb-1");
 
-  function templateName(id: string) {
-    return templates.find((t) => t.id === id)?.name || id;
-  }
+  const [templates, setTemplates] = useState<Template[]>([
+    { id: "tpl-1", name: "Default Agent Program", enabled: true, sequence: [{ kind: "playbook", id: "pb-1" }] },
+  ]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("tpl-1");
 
+  // Wired loading
   async function loadSettings() {
     const res = await fetch("/api/admin/settings");
     const data = await res.json();
     setSettings(data);
+    // Map wired gmail_summary_enabled into skill config default
+    setSkillCfg((cur) => ({
+      ...cur,
+      gmail_summaries: { ...cur.gmail_summaries, enabled: !!data.gmail_summary_enabled },
+    }));
   }
 
   async function loadAccounts() {
@@ -552,17 +296,17 @@ export default function AdminPage() {
   }
 
   useEffect(() => {
-    loadSettings().catch((e: any) => setError(e?.message || String(e)));
-    loadAccounts().catch((e: any) => setError(e?.message || String(e)));
+    loadSettings().catch((e: unknown) => setError(String((e as any)?.message ?? e)));
+    loadAccounts().catch((e: unknown) => setError(String((e as any)?.message ?? e)));
   }, []);
 
-  const gmailAccounts = useMemo(
-    () => accounts.filter((a) => a.provider_type === "gmail" && a.is_active),
-    [accounts]
-  );
+  const gmailAccounts = useMemo(() => accounts.filter((a) => a.provider_type === "gmail"), [accounts]);
+  const gmailActiveAccounts = useMemo(() => gmailAccounts.filter((a) => a.is_active), [gmailAccounts]);
+
+  const selectedPlaybook = useMemo(() => playbooks.find((p) => p.id === selectedPlaybookId) ?? playbooks[0], [playbooks, selectedPlaybookId]);
+  const selectedTemplate = useMemo(() => templates.find((t) => t.id === selectedTemplateId) ?? templates[0], [templates, selectedTemplateId]);
 
   async function saveWiredSettings() {
-    // Concept page: only save keys that exist today (avoid 422 until backend schema is updated).
     setSaving(true);
     setError(null);
     try {
@@ -572,8 +316,6 @@ export default function AdminPage() {
         body: JSON.stringify({
           agent_greeting: settings.agent_greeting,
           realtime_prompt_addendum: settings.realtime_prompt_addendum,
-
-          // Gmail (currently wired)
           gmail_summary_enabled: settings.gmail_summary_enabled,
           gmail_account_id: settings.gmail_account_id,
           gmail_enabled_account_ids: settings.gmail_enabled_account_ids,
@@ -582,64 +324,31 @@ export default function AdminPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to save settings");
       setSettings(data);
-    } catch (e: any) {
-      setError(e?.message || String(e));
+      setSkillCfg((cur) => ({
+        ...cur,
+        gmail_summaries: { ...cur.gmail_summaries, enabled: !!data.gmail_summary_enabled },
+      }));
+    } catch (e: unknown) {
+      setError(String((e as any)?.message ?? e));
     } finally {
       setSaving(false);
     }
   }
 
-  async function patchAccount(id: string, patch: Partial<EmailAccount>) {
-    setError(null);
-    try {
-      const res = await fetch(`/api/admin/email-accounts/${encodeURIComponent(id)}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to update email account");
-      await loadAccounts();
-    } catch (e: any) {
-      setError(e?.message || String(e));
-    }
+  function appendToGreetingNote(key: SkillKey): string {
+    return skillCfg[key].addToGreeting ? "Auto-runs after greeting" : "Runs on demand";
   }
-
-  async function setPrimaryAccount(id: string) {
-    const updates = accounts
-      .filter((a) => a.provider_type === "gmail")
-      .map((a) => patchAccount(a.id, { is_primary: a.id === id }));
-    await Promise.all(updates);
-  }
-
-  async function toggleAccountActive(id: string, nextActive: boolean) {
-    await patchAccount(id, { is_active: nextActive });
-  }
-
-  function toggleEnabledGmailId(id: string) {
-    const cur: string[] = Array.isArray(settings.gmail_enabled_account_ids) ? settings.gmail_enabled_account_ids : [];
-    const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
-    setSettings((p: any) => ({ ...p, gmail_enabled_account_ids: next }));
-  }
-
-  function setDefaultGmailId(id: string) {
-    setSettings((p: any) => ({ ...p, gmail_account_id: id }));
-  }
-
-  const selectedPlaybook = playbooks.find((p) => p.id === selectedPlaybookId) || playbooks[0];
-  const selectedTemplate = templates.find((t) => t.id === selectedTemplateId) || templates[0];
 
   return (
     <div className="page">
-      <div className="bg-watermark" />
-
+      <div className="bg" />
       <div className="wrap">
         <header className="top">
           <div>
             <div className="brand">Vozlia</div>
-            <div className="subtitle">Admin Portal — Concept</div>
+            <div className="subtitle">Admin Portal</div>
           </div>
-          <div className="signedin">
+          <div className="who">
             <div className="muted">Signed in as</div>
             <div className="mono">{primaryEmail || "admin"}</div>
           </div>
@@ -648,784 +357,414 @@ export default function AdminPage() {
         {error ? (
           <div className="alert">
             <div className="alertTitle">Error</div>
-            <div className="alertBody">{String(error)}</div>
+            <div className="alertBody">{error}</div>
           </div>
         ) : null}
 
         <div className="stack">
           <SectionRow
             title="Skills"
-            subtitle="Capabilities/tools (email, sms, calendar, web search, etc.). Click a tile to configure. Drag tiles into playbooks/templates."
+            subtitle="Capabilities/tools. Click a tile to configure. Drag tiles into Playbooks/Templates."
             open={open.skills}
             onToggle={() => setOpen((p) => ({ ...p, skills: !p.skills }))}
-            rightSlot={<Pill>{settings.gmail_summary_enabled ? "Gmail enabled" : "Gmail disabled"}</Pill>}
+            rightSlot={<span className="pill pillOn">{skillCfg.gmail_summaries.enabled ? "Gmail enabled" : "Gmail disabled"}</span>}
           >
-            <div style={{ display: "grid", gap: 14 }}>
-              <div className="gridTiles">
-                {tiles.map((t) => (
-                  <SkillTile
-                    key={t.key}
-                    tile={t}
-                    active={activeSkill === t.key}
-                    onClick={() => setActiveSkill((s) => (s === t.key ? null : t.key))}
-                  />
-                ))}
-              </div>
-
-              <div className="panel">
-                <div className="panelHeader">
-                  <div>
-                    <div className="panelTitle">Greeting Priority (Admin-configurable)</div>
-                    <div className="panelSub">
-                      Controls which skill runs first when multiple skills have <b>Add to greeting</b> enabled. Drag to reorder.
-                      (Concept only; wiring comes next.)
-                    </div>
-                  </div>
-                  <Pill>drag to reorder</Pill>
-                </div>
-
-                <DragList
-                  title="Priority List"
-                  subtitle="Drag items within this list to reorder. (Drop from tiles to add.)"
-                  items={greetingPriority.map((k) => `skill:${k}`)}
-                  allowDropKinds={["skill"]}
-                  itemLabel={(id) => {
-                    const [, key] = id.split(":", 2);
-                    return skillTitle(key as SkillKey);
-                  }}
-                  onMove={(from, to) => {
-                    const keys = greetingPriority.slice();
-                    setGreetingPriority(moveItem(keys, from, to));
-                  }}
-                  onDropAppend={(p) => {
-                    if (p.kind !== "skill") return;
-                    setGreetingPriority((cur) => (cur.includes(p.key) ? cur : [...cur, p.key]));
-                  }}
+            <div className="grid2">
+              <div className="tiles">
+                <SkillTile
+                  title="Gmail Summaries"
+                  desc={appendToGreetingNote("gmail_summaries")}
+                  enabled={skillCfg.gmail_summaries.enabled}
+                  active={activeSkill === "gmail_summaries"}
+                  onClick={() => setActiveSkill((s) => (s === "gmail_summaries" ? null : "gmail_summaries"))}
+                  draggableKey="gmail_summaries"
+                />
+                <SkillTile
+                  title="SMS"
+                  desc={appendToGreetingNote("sms")}
+                  enabled={skillCfg.sms.enabled}
+                  active={activeSkill === "sms"}
+                  onClick={() => setActiveSkill((s) => (s === "sms" ? null : "sms"))}
+                  draggableKey="sms"
+                />
+                <SkillTile
+                  title="Calendar"
+                  desc={appendToGreetingNote("calendar")}
+                  enabled={skillCfg.calendar.enabled}
+                  active={activeSkill === "calendar"}
+                  onClick={() => setActiveSkill((s) => (s === "calendar" ? null : "calendar"))}
+                  draggableKey="calendar"
+                />
+                <SkillTile
+                  title="Web Search"
+                  desc={appendToGreetingNote("web_search")}
+                  enabled={skillCfg.web_search.enabled}
+                  active={activeSkill === "web_search"}
+                  onClick={() => setActiveSkill((s) => (s === "web_search" ? null : "web_search"))}
+                  draggableKey="web_search"
+                />
+                <SkillTile
+                  title="Weather"
+                  desc={appendToGreetingNote("weather")}
+                  enabled={skillCfg.weather.enabled}
+                  active={activeSkill === "weather"}
+                  onClick={() => setActiveSkill((s) => (s === "weather" ? null : "weather"))}
+                  draggableKey="weather"
+                />
+                <SkillTile
+                  title="Investment Reporting"
+                  desc={appendToGreetingNote("investment_reporting")}
+                  enabled={skillCfg.investment_reporting.enabled}
+                  active={activeSkill === "investment_reporting"}
+                  onClick={() => setActiveSkill((s) => (s === "investment_reporting" ? null : "investment_reporting"))}
+                  draggableKey="investment_reporting"
                 />
               </div>
 
-              {activeSkill === "gmail_summaries" ? (
-                <div className="panel">
-                  <div className="panelHeader">
-                    <div>
-                      <div className="panelTitle">Gmail Summaries</div>
-                      <div className="panelSub">Concept controls. Only the main enable + inbox selection are wired today.</div>
-                    </div>
-                    <Pill>{settings.gmail_summary_enabled ? "Enabled" : "Disabled"}</Pill>
-                  </div>
+              <div className="panel">
+                <div className="panelTitle">Greeting Skill Priority</div>
+                <div className="panelSub">Drag skills to reorder. When multiple skills have “Add to greeting” enabled, the topmost runs first.</div>
 
-                  <div style={{ display: "grid", gap: 14 }}>
+                <DropZone
+                  title="Priority List"
+                  subtitle="Drop a skill tile here to move it to the top."
+                  onDropPayload={(p) => {
+                    if (p.type !== "skill") return;
+                    setGreetingPriority((cur) => [p.key, ...cur.filter((k) => k !== p.key)]);
+                  }}
+                >
+                  <div className="list">
+                    {greetingPriority.map((k) => (
+                      <div key={k} className="listItem">
+                        <span className="mono">{k}</span>
+                        <span className={`pill ${skillCfg[k].addToGreeting ? "pillOn" : "pillOff"}`}>{skillCfg[k].addToGreeting ? "Add to greeting" : "Off"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </DropZone>
+              </div>
+            </div>
+
+            {activeSkill ? (
+              <div className="panel" style={{ marginTop: 14 }}>
+                <div className="panelTitle">Configure: {activeSkill}</div>
+                <div className="panelSub">Concept controls (we’ll wire these to the control plane next).</div>
+
+                <div className="form">
+                  {/* Gmail enable is wired to current settings; others are concept */}
+                  {activeSkill === "gmail_summaries" ? (
                     <Switch
                       checked={!!settings.gmail_summary_enabled}
-                      onChange={(v) => setSettings((p: any) => ({ ...p, gmail_summary_enabled: v }))}
+                      onChange={(v) => {
+                        setSettings((p: any) => ({ ...p, gmail_summary_enabled: v }));
+                        setSkillCfg((cur) => ({ ...cur, gmail_summaries: { ...cur.gmail_summaries, enabled: v } }));
+                      }}
                       label="Enable / Disable"
-                      helper="Wired today."
+                      helper="Wired to gmail_summary_enabled"
                     />
-
+                  ) : (
                     <Switch
-                      checked={gmailAddToGreeting}
-                      onChange={setGmailAddToGreeting}
-                      label="Add to greeting"
-                      helper="When enabled, the agent runs this skill immediately after the greeting as if the caller requested it. (Concept only.)"
+                      checked={skillCfg[activeSkill].enabled}
+                      onChange={(v) => setSkillCfg((cur) => ({ ...cur, [activeSkill]: { ...cur[activeSkill], enabled: v } }))}
+                      label="Enable / Disable"
+                      helper="Concept (not wired yet)"
                     />
+                  )}
 
-                    <TextField
-                      label="Engagement Prompt"
-                      value={gmailEngagementPrompt}
-                      onChange={setGmailEngagementPrompt}
-                      placeholder='Example: "If the caller asks about email, offer a Gmail summary."'
-                      helper="Concept — will be used by intent routing."
-                    />
+                  <Switch
+                    checked={skillCfg[activeSkill].addToGreeting}
+                    onChange={(v) =>
+                      setSkillCfg((cur) => ({
+                        ...cur,
+                        [activeSkill]: { ...cur[activeSkill], addToGreeting: v },
+                      }))
+                    }
+                    label="Add to greeting"
+                    helper="When enabled, the agent runs this skill immediately after the greeting (as if requested)."
+                  />
 
-                    <TextField
-                      label="LLM Prompt"
-                      value={gmailLlmPrompt}
-                      onChange={setGmailLlmPrompt}
-                      multiline
-                      placeholder="(Full prompt text used when this skill is engaged.)"
-                      helper="Concept — stored per skill."
-                    />
+                  <TextField
+                    label="Engagement Prompt"
+                    value={skillCfg[activeSkill].engagementPrompt}
+                    onChange={(v) => setSkillCfg((cur) => ({ ...cur, [activeSkill]: { ...cur[activeSkill], engagementPrompt: v } }))}
+                    placeholder='Example: "If the caller asks about email, offer summaries."'
+                    helper="Concept"
+                  />
 
-                    <div className="panel" style={{ background: "rgba(246,249,255,0.65)" }}>
-                      <div className="panelHeader" style={{ marginBottom: 10 }}>
-                        <div>
-                          <div className="panelTitle">Inbox Selection</div>
-                          <div className="panelSub">These determine which inbox Gmail Summaries uses.</div>
-                        </div>
-                      </div>
+                  <TextField
+                    label="LLM Prompt"
+                    value={skillCfg[activeSkill].llmPrompt}
+                    onChange={(v) => setSkillCfg((cur) => ({ ...cur, [activeSkill]: { ...cur[activeSkill], llmPrompt: v } }))}
+                    placeholder="Full prompt text used when this skill runs."
+                    helper="Concept"
+                    multiline
+                  />
 
-                      <div style={{ display: "grid", gap: 14 }}>
-                        <div>
-                          <div style={{ fontWeight: 800, color: "#0F172A" }}>Default Inbox</div>
-                          <div style={{ marginTop: 6, fontSize: 12, color: "#64748B" }}>
-                            Writes to <span className="mono">gmail_account_id</span>.
-                          </div>
+                  {activeSkill === "gmail_summaries" ? (
+                    <div className="panelInset">
+                      <div className="panelTitle">Gmail Inbox Selection</div>
+                      <div className="panelSub">These determine which inbox Gmail Summaries uses.</div>
 
-                          <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                            {gmailAccounts.length === 0 ? (
-                              <div className="muted">No active Gmail accounts found.</div>
-                            ) : (
-                              <select
-                                value={settings.gmail_account_id || ""}
-                                onChange={(e) => setDefaultGmailId(e.target.value)}
-                                style={{
-                                  width: "100%",
-                                  padding: 12,
-                                  borderRadius: 14,
-                                  border: "1px solid rgba(15,23,42,0.12)",
-                                  background: "rgba(255,255,255,0.92)",
-                                  color: "#0F172A",
-                                  boxShadow: "0 12px 26px rgba(15,23,42,0.08)",
-                                }}
-                              >
-                                <option value="">(unset)</option>
-                                {gmailAccounts.map((a) => (
-                                  <option key={a.id} value={a.id}>
-                                    {(a.email_address || a.display_name || a.id) + (a.is_primary ? " (Primary)" : "")}
-                                  </option>
-                                ))}
-                              </select>
-                            )}
-
-                            <button
-                              type="button"
-                              className="btnSecondary"
-                              onClick={() => {
-                                const primary = gmailAccounts.find((a) => a.is_primary);
-                                if (primary) setDefaultGmailId(primary.id);
-                              }}
-                            >
-                              Use Primary Inbox as Default
-                            </button>
-                          </div>
+                      <div className="form">
+                        <div className="field">
+                          <div className="fieldLabel">Default Inbox</div>
+                          <div className="fieldHelper">Maps to gmail_account_id (wired)</div>
+                          <select
+                            className="input"
+                            value={settings.gmail_account_id || ""}
+                            onChange={(e) => setSettings((p: any) => ({ ...p, gmail_account_id: e.target.value }))}
+                          >
+                            <option value="">(not set)</option>
+                            {gmailActiveAccounts.map((a) => (
+                              <option key={a.id} value={a.id}>
+                                {(a.email_address || a.display_name || a.id) + (a.is_primary ? " (primary)" : "")}
+                              </option>
+                            ))}
+                          </select>
                         </div>
 
-                        <div>
-                          <div style={{ fontWeight: 800, color: "#0F172A" }}>Enabled Inboxes</div>
-                          <div style={{ marginTop: 6, fontSize: 12, color: "#64748B" }}>
-                            Writes to <span className="mono">gmail_enabled_account_ids</span> (multi-inbox).
-                          </div>
-
-                          <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                            {gmailAccounts.map((a) => {
-                              const enabledIds: string[] = Array.isArray(settings.gmail_enabled_account_ids)
-                                ? settings.gmail_enabled_account_ids
-                                : [];
-                              const checked = enabledIds.includes(a.id);
-                              const label = a.email_address || a.display_name || a.id;
+                        <div className="field">
+                          <div className="fieldLabel">Enabled Inboxes</div>
+                          <div className="fieldHelper">Maps to gmail_enabled_account_ids (wired)</div>
+                          <div className="checkGrid">
+                            {gmailActiveAccounts.map((a) => {
+                              const enabled: string[] = Array.isArray(settings.gmail_enabled_account_ids) ? settings.gmail_enabled_account_ids : [];
+                              const checked = enabled.includes(a.id);
                               return (
-                                <label
-                                  key={a.id}
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "space-between",
-                                    gap: 12,
-                                    padding: 12,
-                                    borderRadius: 14,
-                                    border: "1px solid rgba(15,23,42,0.10)",
-                                    background: "rgba(255,255,255,0.98)",
-                                  }}
-                                >
-                                  <div style={{ minWidth: 0 }}>
-                                    <div style={{ fontWeight: 900, color: "#0F172A" }}>{label}</div>
-                                    <div style={{ marginTop: 4, fontSize: 12, color: "#64748B" }}>
-                                      {a.is_primary ? "Primary" : "Secondary"} • <span className="mono">{a.id}</span>
-                                    </div>
-                                  </div>
+                                <label key={a.id} className="checkRow">
                                   <input
                                     type="checkbox"
                                     checked={checked}
-                                    onChange={() => toggleEnabledGmailId(a.id)}
-                                    style={{ width: 18, height: 18 }}
+                                    onChange={() => {
+                                      const next = checked ? enabled.filter((x) => x !== a.id) : [...enabled, a.id];
+                                      setSettings((p: any) => ({ ...p, gmail_enabled_account_ids: next }));
+                                    }}
                                   />
+                                  <span className="checkText">{a.email_address || a.display_name || a.id}</span>
                                 </label>
                               );
                             })}
                           </div>
                         </div>
+
+                        <div className="actions">
+                          <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
+                            {saving ? "Saving…" : "Save Gmail Settings"}
+                          </button>
+                        </div>
                       </div>
                     </div>
-
-                    <div className="actions">
-                      <button className="btnPrimary" type="button" disabled={saving} onClick={saveWiredSettings}>
-                        {saving ? "Saving…" : "Save (wired settings)"}
-                      </button>
-                      <button
-                        className="btnSecondary"
-                        type="button"
-                        onClick={() => {
-                          setGmailEngagementPrompt("");
-                          setGmailLlmPrompt("");
-                          setGmailAddToGreeting(false);
-                        }}
-                      >
-                        Reset concept fields
-                      </button>
-                    </div>
-                  </div>
+                  ) : null}
                 </div>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
           </SectionRow>
 
           <SectionRow
             title="Playbooks"
-            subtitle="Reusable workflow building blocks. Build a playbook by dragging enabled skills into its container, then reorder."
+            subtitle="Reusable workflows. Build by dragging enabled skill tiles into a playbook container."
             open={open.playbooks}
             onToggle={() => setOpen((p) => ({ ...p, playbooks: !p.playbooks }))}
-            rightSlot={<Pill>{playbooks.length} playbook(s)</Pill>}
           >
-            <div style={{ display: "grid", gap: 14 }}>
+            <div className="grid2">
               <div className="panel">
-                <div className="panelHeader">
-                  <div>
-                    <div className="panelTitle">Playbook List</div>
-                    <div className="panelSub">Select a playbook to edit. (Concept only.)</div>
-                  </div>
-                  <button
-                    className="btnSecondary"
-                    type="button"
-                    onClick={() => {
-                      const id = `pb_${Math.random().toString(16).slice(2, 8)}`;
-                      setPlaybooks((p) => [...p, { id, name: "New Playbook", enabled: false, steps: [] }]);
-                      setSelectedPlaybookId(id);
-                    }}
-                  >
-                    + New Playbook
-                  </button>
-                </div>
+                <div className="panelTitle">Playbooks</div>
+                <div className="panelSub">Concept UI (not wired yet).</div>
 
-                <div className="row">
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <select
-                      value={selectedPlaybookId}
-                      onChange={(e) => setSelectedPlaybookId(e.target.value)}
-                      style={{
-                        width: "100%",
-                        padding: 12,
-                        borderRadius: 14,
-                        border: "1px solid rgba(15,23,42,0.12)",
-                        background: "rgba(255,255,255,0.92)",
-                        color: "#0F172A",
-                        boxShadow: "0 12px 26px rgba(15,23,42,0.08)",
+                <div className="list">
+                  {playbooks.map((pb) => (
+                    <button
+                      key={pb.id}
+                      type="button"
+                      className={`listSelect ${pb.id === selectedPlaybookId ? "active" : ""}`}
+                      onClick={() => setSelectedPlaybookId(pb.id)}
+                      draggable
+                      onDragStart={(e) => {
+                        const payload: DragPayload = { type: "playbook", id: pb.id };
+                        e.dataTransfer.setData("application/json", JSON.stringify(payload));
+                        e.dataTransfer.effectAllowed = "copyMove";
                       }}
                     >
-                      {playbooks.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name} {p.enabled ? "" : "(disabled)"}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div style={{ flex: "0 0 auto", width: 240 }}>
-                    <Switch
-                      checked={!!selectedPlaybook?.enabled}
-                      onChange={(v) =>
-                        setPlaybooks((cur) => cur.map((p) => (p.id === selectedPlaybookId ? { ...p, enabled: v } : p)))
-                      }
-                      label="Enabled"
-                      helper="Concept"
-                    />
-                  </div>
+                      <div className="row">
+                        <div className="rowMain">
+                          <div className="rowTitle">{pb.name}</div>
+                          <div className="rowSub mono">{pb.id}</div>
+                        </div>
+                        <span className={`pill ${pb.enabled ? "pillOn" : "pillOff"}`}>{pb.enabled ? "Enabled" : "Disabled"}</span>
+                      </div>
+                    </button>
+                  ))}
                 </div>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14 }}>
-                <div className="panel">
-                  <div className="panelHeader">
-                    <div>
-                      <div className="panelTitle">Enabled Skills</div>
-                      <div className="panelSub">Drag these into the playbook container.</div>
-                    </div>
-                    <Pill>drag</Pill>
-                  </div>
+              <div className="panel">
+                <div className="panelTitle">Build: {selectedPlaybook?.name ?? "Playbook"}</div>
+                <div className="panelSub">Drop skills into the container. Order = execution order.</div>
 
-                  <div style={{ display: "grid", gap: 10 }}>
-                    {tiles.filter((t) => t.enabled).map((t) => (
-                      <div
-                        key={`pick-${t.key}`}
-                        draggable
-                        onDragStart={(e) => {
-                          e.dataTransfer.setData("text/plain", `skill:${t.key}`);
-                          e.dataTransfer.effectAllowed = "move";
-                        }}
-                        style={{
-                          padding: 12,
-                          borderRadius: 14,
-                          border: "1px solid rgba(15,23,42,0.10)",
-                          background: "rgba(255,255,255,0.98)",
-                          cursor: "grab",
-                        }}
-                        title="Drag into playbook"
-                      >
-                        <div style={{ fontWeight: 900, color: "#0F172A" }}>{t.title}</div>
-                        <div style={{ marginTop: 4, fontSize: 12, color: "#64748B" }}>{t.description}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                <Switch
+                  checked={!!selectedPlaybook?.enabled}
+                  onChange={(v) => {
+                    setPlaybooks((cur) => cur.map((p) => (p.id === selectedPlaybookId ? { ...p, enabled: v } : p)));
+                  }}
+                  label="Enable Playbook"
+                />
 
-                <DragList
-                  title={`Playbook Steps — ${selectedPlaybook?.name || "Playbook"}`}
-                  subtitle="Drop enabled skills here. Drag to reorder. (Concept only.)"
-                  items={(selectedPlaybook?.steps || []).map((k) => `skill:${k}`)}
-                  allowDropKinds={["skill"]}
-                  itemLabel={(id) => {
-                    const [, key] = id.split(":", 2);
-                    return skillTitle(key as SkillKey);
-                  }}
-                  rightSlot={<Pill>{(selectedPlaybook?.steps || []).length} step(s)</Pill>}
-                  onMove={(from, to) => {
-                    setPlaybooks((cur) =>
-                      cur.map((p) => (p.id === selectedPlaybookId ? { ...p, steps: moveItem(p.steps, from, to) } : p))
-                    );
-                  }}
-                  onDropAppend={(p) => {
-                    if (p.kind !== "skill") return;
+                <DropZone
+                  title="Playbook Steps"
+                  subtitle="Drop a skill tile here to append it."
+                  onDropPayload={(p) => {
+                    if (p.type !== "skill") return;
                     setPlaybooks((cur) =>
                       cur.map((pb) => {
                         if (pb.id !== selectedPlaybookId) return pb;
-                        const next = pb.steps.includes(p.key) ? pb.steps : [...pb.steps, p.key];
-                        return { ...pb, steps: next };
+                        const exists = pb.steps.includes(p.key);
+                        return exists ? pb : { ...pb, steps: [...pb.steps, p.key] };
                       })
                     );
                   }}
-                />
-              </div>
-
-              <div className="actions">
-                <button className="btnPrimary" type="button" onClick={() => alert("Concept only: will save playbook config to control plane.")}>
-                  Save Playbook (concept)
-                </button>
-                <button
-                  className="btnSecondary"
-                  type="button"
-                  onClick={() =>
-                    setPlaybooks((cur) =>
-                      cur.map((p) => (p.id === selectedPlaybookId ? { ...p, steps: [] } : p))
-                    )
-                  }
                 >
-                  Clear steps
-                </button>
+                  <div className="chips">
+                    {(selectedPlaybook?.steps ?? []).map((k, idx) => (
+                      <div key={`${k}-${idx}`} className="chip">
+                        <span className="mono">{k}</span>
+                        <button
+                          type="button"
+                          className="chipX"
+                          onClick={() => {
+                            setPlaybooks((cur) =>
+                              cur.map((pb) => {
+                                if (pb.id !== selectedPlaybookId) return pb;
+                                return { ...pb, steps: pb.steps.filter((x, i) => !(i === idx && x === k)) };
+                              })
+                            );
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                    {(selectedPlaybook?.steps ?? []).length === 0 ? <div className="muted">No steps yet. Drag a skill tile in.</div> : null}
+                  </div>
+                </DropZone>
               </div>
             </div>
           </SectionRow>
 
           <SectionRow
             title="Templates"
-            subtitle="Tenant program: templates orchestrate playbooks + skills. Drag playbooks/skills into a template container, reorder as needed."
+            subtitle="Tenant agent programs. Build by dragging playbooks and/or skills into a template container."
             open={open.templates}
             onToggle={() => setOpen((p) => ({ ...p, templates: !p.templates }))}
-            rightSlot={<Pill>{templates.length} template(s)</Pill>}
           >
-            <div style={{ display: "grid", gap: 14 }}>
+            <div className="grid2">
               <div className="panel">
-                <div className="panelHeader">
-                  <div>
-                    <div className="panelTitle">Template List</div>
-                    <div className="panelSub">Select a template to edit. (Concept only.)</div>
-                  </div>
-                  <button
-                    className="btnSecondary"
-                    type="button"
-                    onClick={() => {
-                      const id = `tpl_${Math.random().toString(16).slice(2, 8)}`;
-                      setTemplates((t) => [...t, { id, name: "New Template", enabled: false, sequence: [] }]);
-                      setSelectedTemplateId(id);
-                    }}
-                  >
-                    + New Template
-                  </button>
-                </div>
+                <div className="panelTitle">Templates</div>
+                <div className="panelSub">Concept UI (not wired yet).</div>
 
-                <div className="row">
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <select
-                      value={selectedTemplateId}
-                      onChange={(e) => setSelectedTemplateId(e.target.value)}
-                      style={{
-                        width: "100%",
-                        padding: 12,
-                        borderRadius: 14,
-                        border: "1px solid rgba(15,23,42,0.12)",
-                        background: "rgba(255,255,255,0.92)",
-                        color: "#0F172A",
-                        boxShadow: "0 12px 26px rgba(15,23,42,0.08)",
-                      }}
+                <div className="list">
+                  {templates.map((tpl) => (
+                    <button
+                      key={tpl.id}
+                      type="button"
+                      className={`listSelect ${tpl.id === selectedTemplateId ? "active" : ""}`}
+                      onClick={() => setSelectedTemplateId(tpl.id)}
                     >
-                      {templates.map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.name} {t.enabled ? "" : "(disabled)"}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div style={{ flex: "0 0 auto", width: 240 }}>
-                    <Switch
-                      checked={!!selectedTemplate?.enabled}
-                      onChange={(v) =>
-                        setTemplates((cur) => cur.map((t) => (t.id === selectedTemplateId ? { ...t, enabled: v } : t)))
-                      }
-                      label="Enabled"
-                      helper="Concept"
-                    />
-                  </div>
+                      <div className="row">
+                        <div className="rowMain">
+                          <div className="rowTitle">{tpl.name}</div>
+                          <div className="rowSub mono">{tpl.id}</div>
+                        </div>
+                        <span className={`pill ${tpl.enabled ? "pillOn" : "pillOff"}`}>{tpl.enabled ? "Enabled" : "Disabled"}</span>
+                      </div>
+                    </button>
+                  ))}
                 </div>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14 }}>
-                <div className="panel">
-                  <div className="panelHeader">
-                    <div>
-                      <div className="panelTitle">Available Tiles</div>
-                      <div className="panelSub">Drag playbooks or enabled skills into the template container.</div>
-                    </div>
-                    <Pill>drag</Pill>
-                  </div>
+              <div className="panel">
+                <div className="panelTitle">Build: {selectedTemplate?.name ?? "Template"}</div>
+                <div className="panelSub">Drop playbooks (from list) or skills (from Skills tiles) into the container. Order = execution order.</div>
 
-                  <div style={{ display: "grid", gap: 10 }}>
-                    <div style={{ fontWeight: 900, color: "#0F172A" }}>Playbooks</div>
-                    {playbooks.map((p) => (
-                      <div
-                        key={`pb-tile-${p.id}`}
-                        draggable
-                        onDragStart={(e) => {
-                          e.dataTransfer.setData("text/plain", `playbook:${p.id}`);
-                          e.dataTransfer.effectAllowed = "move";
-                        }}
-                        style={{
-                          padding: 12,
-                          borderRadius: 14,
-                          border: "1px solid rgba(15,23,42,0.10)",
-                          background: "rgba(255,255,255,0.98)",
-                          cursor: "grab",
-                        }}
-                        title="Drag into template"
-                      >
-                        <div style={{ fontWeight: 900, color: "#0F172A" }}>
-                          {p.name}{" "}
-                          <span style={{ fontSize: 12, color: "#64748B" }}>
-                            ({p.enabled ? "enabled" : "disabled"})
-                          </span>
-                        </div>
-                        <div style={{ marginTop: 4, fontSize: 12, color: "#64748B" }}>
-                          Steps: {p.steps.map(skillTitle).join(" → ") || "(empty)"}
-                        </div>
-                      </div>
-                    ))}
+                <Switch
+                  checked={!!selectedTemplate?.enabled}
+                  onChange={(v) => setTemplates((cur) => cur.map((t) => (t.id === selectedTemplateId ? { ...t, enabled: v } : t)))}
+                  label="Enable Template"
+                />
 
-                    <div style={{ marginTop: 8, fontWeight: 900, color: "#0F172A" }}>Enabled Skills</div>
-                    {tiles.filter((t) => t.enabled).map((t) => (
-                      <div
-                        key={`skill-tile-${t.key}`}
-                        draggable
-                        onDragStart={(e) => {
-                          e.dataTransfer.setData("text/plain", `skill:${t.key}`);
-                          e.dataTransfer.effectAllowed = "move";
-                        }}
-                        style={{
-                          padding: 12,
-                          borderRadius: 14,
-                          border: "1px solid rgba(15,23,42,0.10)",
-                          background: "rgba(255,255,255,0.98)",
-                          cursor: "grab",
-                        }}
-                        title="Drag into template"
-                      >
-                        <div style={{ fontWeight: 900, color: "#0F172A" }}>{t.title}</div>
-                        <div style={{ marginTop: 4, fontSize: 12, color: "#64748B" }}>{t.description}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                <DropZone
+                  title="Template Sequence"
+                  subtitle="Drop a playbook or skill to append it."
+                  onDropPayload={(p) => {
+                    const item: TemplateItem | null =
+                      p.type === "playbook" ? { kind: "playbook", id: p.id } : { kind: "skill", key: p.key };
 
-                <DragList
-                  title={`Template Sequence — ${selectedTemplate?.name || "Template"}`}
-                  subtitle="Drop playbooks/skills here. Drag to reorder. (Concept only.)"
-                  items={(selectedTemplate?.sequence || []).map((x) => (x.kind === "skill" ? `skill:${x.key}` : `playbook:${x.id}`))}
-                  allowDropKinds={["skill", "playbook"]}
-                  itemLabel={(id) => {
-                    const [kind, key] = id.split(":", 2);
-                    if (kind === "skill") return `Skill: ${skillTitle(key as SkillKey)}`;
-                    return `Playbook: ${playbookName(key)}`;
-                  }}
-                  rightSlot={<Pill>{(selectedTemplate?.sequence || []).length} item(s)</Pill>}
-                  onMove={(from, to) => {
-                    setTemplates((cur) =>
-                      cur.map((t) =>
-                        t.id === selectedTemplateId ? { ...t, sequence: moveItem(t.sequence, from, to) } : t
-                      )
-                    );
-                  }}
-                  onDropAppend={(p) => {
+                    if (!item) return;
+
                     setTemplates((cur) =>
                       cur.map((t) => {
                         if (t.id !== selectedTemplateId) return t;
-                        const exists =
-                          p.kind === "skill"
-                            ? t.sequence.some((x) => x.kind === "skill" && x.key === p.key)
-                            : t.sequence.some((x) => x.kind === "playbook" && x.id === p.id);
 
-                        if (exists) return t;
-                        const next = p.kind === "skill" ? [...t.sequence, { kind: "skill", key: p.key }] : [...t.sequence, { kind: "playbook", id: p.id }];
-                        return { ...t, sequence: next };
+                        const exists =
+                          item.kind === "playbook"
+                            ? t.sequence.some((x) => x.kind === "playbook" && x.id === item.id)
+                            : t.sequence.some((x) => x.kind === "skill" && x.key === item.key);
+
+                        return exists ? t : { ...t, sequence: [...t.sequence, item] };
                       })
                     );
                   }}
-                />
-              </div>
-
-              <div className="actions">
-                <button className="btnPrimary" type="button" onClick={() => alert("Concept only: will save template config to control plane.")}>
-                  Save Template (concept)
-                </button>
-                <button
-                  className="btnSecondary"
-                  type="button"
-                  onClick={() =>
-                    setTemplates((cur) => cur.map((t) => (t.id === selectedTemplateId ? { ...t, sequence: [] } : t)))
-                  }
                 >
-                  Clear sequence
-                </button>
-              </div>
-
-              <div className="hint">
-                Later: add “Execute Template” and “Execute Playbook” test actions with sandbox mode and runtime re-ordering driven by user intent.
-              </div>
-            </div>
-          </SectionRow>
-
-          <SectionRow
-            title="Agent Memory"
-            subtitle="Short-term and long-term toggles, engagement prompt, and Memory Bank (concept DB view)."
-            open={open.agentMemory}
-            onToggle={() => setOpen((p) => ({ ...p, agentMemory: !p.agentMemory }))}
-          >
-            <div style={{ display: "grid", gap: 14 }}>
-              <div className="panel">
-                <div className="panelHeader">
-                  <div>
-                    <div className="panelTitle">Memory</div>
-                    <div className="panelSub">Concept UI — wiring comes next.</div>
+                  <div className="chips">
+                    {(selectedTemplate?.sequence ?? []).map((it, idx) => (
+                      <div key={`${it.kind}-${"id" in it ? it.id : it.key}-${idx}`} className="chip">
+                        <span className="mono">
+                          {it.kind}:{it.kind === "playbook" ? it.id : it.key}
+                        </span>
+                        <button
+                          type="button"
+                          className="chipX"
+                          onClick={() => {
+                            setTemplates((cur) =>
+                              cur.map((t) => {
+                                if (t.id !== selectedTemplateId) return t;
+                                return { ...t, sequence: t.sequence.filter((_, i) => i !== idx) };
+                              })
+                            );
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                    {(selectedTemplate?.sequence ?? []).length === 0 ? <div className="muted">No items yet. Drag a playbook or skill in.</div> : null}
                   </div>
-                </div>
-
-                <div style={{ display: "grid", gap: 14 }}>
-                  <Switch
-                    checked={!!settings.shortterm_memory_enabled}
-                    onChange={(v) => setSettings((p: any) => ({ ...p, shortterm_memory_enabled: v }))}
-                    label="Enable Short-Term Memory"
-                    helper="Concept now; backend wiring later."
-                  />
-                  <Switch
-                    checked={!!settings.longterm_memory_enabled}
-                    onChange={(v) => setSettings((p: any) => ({ ...p, longterm_memory_enabled: v }))}
-                    label="Enable Long-Term Memory"
-                    helper="Concept now; backend wiring later."
-                  />
-
-                  <TextField
-                    label="Engagement Prompt"
-                    value={memoryEngagementPrompt}
-                    onChange={setMemoryEngagementPrompt}
-                    placeholder='Example: "If caller says earlier / last time / remember, consult long-term memory."'
-                    helper="Phrases to tell the routing layer to engage long-term memory."
-                  />
-                </div>
-              </div>
-
-              <div className="panel">
-                <div className="panelHeader">
-                  <div>
-                    <div className="panelTitle">Memory Bank</div>
-                    <div className="panelSub">Search + table view of long-term memory events (concept).</div>
-                  </div>
-                </div>
-
-                <div style={{ display: "grid", gap: 12 }}>
-                  <TextField
-                    label="Search"
-                    value={memorySearch}
-                    onChange={setMemorySearch}
-                    placeholder='Filter by caller, keyword, fact key, "favorite_color", etc.'
-                    helper="Concept: will query control plane endpoint like /admin/memory?search=..."
-                  />
-
-                  <div className="tableShell">
-                    <div className="tableHeader">
-                      <div className="muted">No data yet (concept)</div>
-                      <div className="muted mono">Memory events will render here</div>
-                    </div>
-                    <div className="tableEmpty">
-                      Wire a control-plane endpoint to list/query memory events, then render rows here.
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </SectionRow>
-
-          <SectionRow
-            title="Chit-Chat"
-            subtitle="Conversational tuning."
-            open={open.chitchat}
-            onToggle={() => setOpen((p) => ({ ...p, chitchat: !p.chitchat }))}
-          >
-            <div className="panel">
-              <div className="panelHeader">
-                <div>
-                  <div className="panelTitle">Chit-Chat</div>
-                  <div className="panelSub">Response delay and other controls (concept).</div>
-                </div>
-              </div>
-
-              <div style={{ display: "grid", gap: 14 }}>
-                <TextField
-                  label="Response Delay Time (seconds)"
-                  value={chitchatDelaySec}
-                  onChange={setChitchatDelaySec}
-                  placeholder="2.0"
-                  helper="Time of dead air before Vozlia responds."
-                />
-              </div>
-            </div>
-          </SectionRow>
-
-          <SectionRow
-            title="Logging"
-            subtitle="Toggle logging categories. Render logs are shown below."
-            open={open.logging}
-            onToggle={() => setOpen((p) => ({ ...p, logging: !p.logging }))}
-          >
-            <div className="panel">
-              <div className="panelHeader">
-                <div>
-                  <div className="panelTitle">Logging Toggles</div>
-                  <div className="panelSub">Concept UI. (We can persist these later.)</div>
-                </div>
-              </div>
-
-              <div style={{ display: "grid", gap: 14 }}>
-                {Object.entries(logToggles).map(([k, v]) => (
-                  <Switch
-                    key={k}
-                    checked={v}
-                    onChange={(next) => setLogToggles((p) => ({ ...p, [k]: next }))}
-                    label={k}
-                    helper="Concept toggle"
-                  />
-                ))}
-
-                <div className="hint">
-                  Recommended for stability: keep <b>REALTIME_LOG_DELTAS</b> off, keep stats on.
-                </div>
-              </div>
-            </div>
-          </SectionRow>
-
-          <SectionRow
-            title="Agent Core"
-            subtitle="Greeting and realtime prompt addendum (existing wired settings)."
-            open={open.core}
-            onToggle={() => setOpen((p) => ({ ...p, core: !p.core }))}
-          >
-            <div className="panel">
-              <div className="panelHeader">
-                <div>
-                  <div className="panelTitle">Agent Core</div>
-                  <div className="panelSub">Already wired to the control plane.</div>
-                </div>
-              </div>
-
-              <div style={{ display: "grid", gap: 14 }}>
-                <TextField
-                  label="Greeting"
-                  value={settings.agent_greeting || ""}
-                  onChange={(v) => setSettings((p: any) => ({ ...p, agent_greeting: v }))}
-                  placeholder="Hello! How can I help?"
-                  helper="Used for calls."
-                />
-
-                <TextField
-                  label="Realtime Prompt Addendum"
-                  value={settings.realtime_prompt_addendum || ""}
-                  onChange={(v) => setSettings((p: any) => ({ ...p, realtime_prompt_addendum: v }))}
-                  multiline
-                  placeholder="(Rules for the realtime assistant...)"
-                  helper="Affects prompt shaping."
-                />
-
-                <div className="actions">
-                  <button className="btnPrimary" type="button" disabled={saving} onClick={saveWiredSettings}>
-                    {saving ? "Saving…" : "Save"}
-                  </button>
-                  <button
-                    className="btnSecondary"
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        setError(null);
-                        await Promise.all([loadSettings(), loadAccounts()]);
-                      } catch (e: any) {
-                        setError(e?.message || String(e));
-                      }
-                    }}
-                  >
-                    Refresh
-                  </button>
-                </div>
+                </DropZone>
               </div>
             </div>
           </SectionRow>
 
           <SectionRow
             title="Email Accounts"
-            subtitle="Manage connected inboxes (Gmail) and primary inbox selection."
+            subtitle="Connected Gmail accounts. These IDs map to Gmail Summaries inbox selection."
             open={open.email}
             onToggle={() => setOpen((p) => ({ ...p, email: !p.email }))}
           >
             <div className="panel">
-              <div className="panelHeader">
-                <div>
-                  <div className="panelTitle">Email Accounts</div>
-                  <div className="panelSub">
-                    These flags (Primary/Active) don’t automatically change Gmail Summaries default inbox unless you set Default Inbox above.
-                  </div>
-                </div>
-              </div>
-
               {accountsLoading ? (
                 <div className="muted">Loading…</div>
               ) : gmailAccounts.length === 0 ? (
-                <div className="muted">No active Gmail accounts found.</div>
+                <div className="muted">No Gmail accounts found.</div>
               ) : (
-                <div style={{ display: "grid", gap: 10 }}>
+                <div className="list">
                   {gmailAccounts.map((a) => (
                     <div key={a.id} className="rowCard">
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontWeight: 950, color: "#0F172A" }}>
-                          {a.email_address || a.display_name || a.id}
-                        </div>
-                        <div className="muted" style={{ marginTop: 4 }}>
-                          {a.is_primary ? "Primary" : "Secondary"} · {a.is_active ? "Active" : "Inactive"} ·{" "}
-                          <span className="mono">{a.id}</span>
+                      <div>
+                        <div className="rowTitle">{a.email_address || a.display_name || a.id}</div>
+                        <div className="rowSub">
+                          <span className="mono">{a.id}</span> · {a.is_primary ? "Primary" : "Secondary"} · {a.is_active ? "Active" : "Inactive"}
                         </div>
                       </div>
-
-                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                        <button className={a.is_primary ? "btnPrimary" : "btnSecondary"} type="button" onClick={() => setPrimaryAccount(a.id)}>
-                          {a.is_primary ? "Primary" : "Make Primary"}
-                        </button>
-
-                        <button className="btnSecondary" type="button" onClick={() => toggleAccountActive(a.id, !a.is_active)}>
-                          {a.is_active ? "Disable" : "Enable"}
-                        </button>
-                      </div>
+                      <span className={`pill ${a.is_active ? "pillOn" : "pillOff"}`}>{a.is_active ? "Active" : "Inactive"}</span>
                     </div>
                   ))}
                 </div>
@@ -1435,7 +774,7 @@ export default function AdminPage() {
 
           <SectionRow
             title="Render Logs"
-            subtitle="Live logs fetched from Render (existing panel)."
+            subtitle="Live logs fetched from Render."
             open={open.renderLogs}
             onToggle={() => setOpen((p) => ({ ...p, renderLogs: !p.renderLogs }))}
           >
@@ -1453,146 +792,260 @@ export default function AdminPage() {
 
         <footer className="foot">
           <div className="muted">
-            Concept UI only — next step is wiring Skills/Playbooks/Templates configs into the control plane and agent runtime.
+            Concept UI: Skills, Playbooks, Templates are not wired yet. Gmail Summaries enable + inbox selection remains wired.
           </div>
         </footer>
       </div>
 
       <style jsx global>{`
-        :root {
-          --bg: #F6F9FF;
-          --card: rgba(255,255,255,0.82);
-          --cardSolid: #FFFFFF;
-          --border: rgba(15,23,42,0.12);
-          --text: #0F172A;
-          --muted: #64748B;
-          --accent: #06B6D4;
+        :root{
+          --bg:#F6F9FF;
+          --card:#FFFFFF;
+          --border:#E6ECF5;
+          --text:#0F172A;
+          --muted:#64748B;
+          --accent:#06B6D4;
           --accentSoft: rgba(6,182,212,0.12);
+          --shadow: 0 10px 30px rgba(15,23,42,0.08);
         }
 
-        html, body {
-          margin: 0;
-          padding: 0;
-          background: var(--bg);
-          color: var(--text);
-          font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+        html,body{ margin:0; padding:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+        .page{ min-height:100vh; position:relative; overflow-x:hidden; }
+        .bg{
+          position: fixed; inset:0;
+          background-image:url("/circuit-watermark.jpg");
+          background-size:cover; background-position:center;
+          opacity:0.045; pointer-events:none;
         }
+        .wrap{ position:relative; z-index:1; max-width:1080px; margin:0 auto; padding:22px 18px 50px; }
 
-        .page { min-height: 100vh; position: relative; overflow-x: hidden; }
-
-        .bg-watermark {
-          position: fixed;
-          inset: 0;
-          background-image: url("/circuit-watermark.jpg");
-          background-size: cover;
-          background-position: center;
-          background-repeat: no-repeat;
-          opacity: 0.045;
-          pointer-events: none;
-          z-index: 0;
-        }
-
-        .wrap { position: relative; z-index: 1; max-width: 1080px; margin: 0 auto; padding: 26px 18px 44px; }
-
-        .top {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-          gap: 16px;
-          padding: 18px;
-          border-radius: 20px;
-          border: 1px solid var(--border);
+        .top{
+          display:flex; justify-content:space-between; gap:16px; align-items:flex-start;
           background: var(--card);
-          box-shadow: 0 18px 60px rgba(15, 23, 42, 0.08);
+          border:1px solid var(--border);
+          border-radius:18px;
+          padding:18px;
+          box-shadow: var(--shadow);
+        }
+        .brand{ font-size:22px; font-weight:900; letter-spacing:-0.02em; }
+        .subtitle{ margin-top:4px; color:var(--muted); font-size:13px; }
+        .who{ text-align:right; min-width:220px; }
+        .muted{ color:var(--muted); font-size:12px; }
+        .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+
+        .alert{
+          margin-top:14px; padding:14px 16px;
+          border-radius:16px;
+          border:1px solid rgba(239,68,68,0.35);
+          background: rgba(239,68,68,0.08);
+          box-shadow: var(--shadow);
+        }
+        .alertTitle{ font-weight:900; }
+        .alertBody{ margin-top:6px; white-space:pre-wrap; font-size:13px; }
+
+        .stack{ margin-top:16px; display:grid; gap:14px; }
+
+        .sectionShell{
+          border-radius:18px;
+          background: var(--card);
+          border:1px solid var(--border);
+          box-shadow: var(--shadow);
+          overflow:hidden;
+        }
+        .sectionHeader{
+          width:100%; display:flex; align-items:center; gap:12px;
+          padding:16px;
+          background:transparent; border:none;
+          cursor:pointer; text-align:left;
+        }
+        .plus{
+          width:22px; height:22px; border-radius:8px;
+          display:inline-flex; align-items:center; justify-content:center;
+          border:1px solid var(--border);
+          background: rgba(15,23,42,0.02);
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+          font-size:16px;
+        }
+        .sectionText{ flex:1; min-width:0; }
+        .sectionTitle{ font-weight:900; }
+        .sectionSub{ margin-top:4px; color:var(--muted); font-size:13px; line-height:1.35; }
+        .sectionRight{ flex:0 0 auto; }
+        .sectionBody{ padding:16px; padding-top:0; }
+        .sectionBody::before{ content:""; display:block; height:1px; background:var(--border); margin-bottom:16px; }
+
+        .panel{
+          background: var(--card);
+          border:1px solid var(--border);
+          border-radius:18px;
+          padding:14px;
+          box-shadow: var(--shadow);
+        }
+        .panelInset{
+          background: rgba(6,182,212,0.03);
+          border:1px solid rgba(6,182,212,0.18);
+          border-radius:16px;
+          padding:14px;
+        }
+        .panelTitle{ font-weight:900; font-size:14px; }
+        .panelSub{ margin-top:4px; color:var(--muted); font-size:12px; line-height:1.35; }
+
+        .grid2{ display:grid; grid-template-columns: 1.25fr 1fr; gap:14px; }
+        @media (max-width: 980px){ .grid2{ grid-template-columns: 1fr; } }
+
+        .tiles{
+          display:grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap:14px;
+        }
+        .tile{
+          text-align:left;
+          border-radius:16px;
+          border:1px solid var(--border);
+          background: var(--card);
+          padding:14px;
+          cursor:pointer;
+          box-shadow: var(--shadow);
+        }
+        .tile.active{
+          border:1px solid rgba(6,182,212,0.6);
+          box-shadow: 0 12px 34px rgba(6,182,212,0.10);
+        }
+        .tileTop{ display:flex; justify-content:space-between; align-items:center; gap:10px; }
+        .tileTitle{ font-weight:900; }
+        .tileDesc{ margin-top:6px; font-size:13px; color:var(--muted); line-height:1.35; }
+
+        .pill{
+          font-size:12px;
+          padding:4px 10px;
+          border-radius:999px;
+          border:1px solid var(--border);
+          font-weight:800;
+          white-space:nowrap;
+        }
+        .pillOn{ background: var(--accentSoft); color: #0e7490; border-color: rgba(6,182,212,0.28); }
+        .pillOff{ background: rgba(100,116,139,0.08); color: #475569; }
+
+        .form{ margin-top:14px; display:grid; gap:14px; }
+        .field{ display:grid; gap:6px; }
+        .fieldLabel{ font-weight:800; }
+        .fieldHelper{ color:var(--muted); font-size:12px; }
+        .input{
+          width:100%;
+          padding:12px;
+          border-radius:12px;
+          border:1px solid var(--border);
+          background: #ffffff;
+          color: var(--text);
+          outline:none;
+          box-shadow: 0 6px 18px rgba(15,23,42,0.05);
         }
 
-        .brand { font-size: 22px; font-weight: 950; letter-spacing: -0.02em; }
-        .subtitle { margin-top: 4px; color: var(--muted); font-size: 13px; }
-        .signedin { text-align: right; min-width: 220px; }
-        .muted { color: var(--muted); font-size: 12px; }
-        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-
-        .alert {
-          margin-top: 14px;
-          padding: 14px 16px;
-          border-radius: 18px;
-          border: 1px solid rgba(248, 113, 113, 0.4);
-          background: rgba(254, 226, 226, 0.7);
-          box-shadow: 0 18px 60px rgba(15, 23, 42, 0.08);
+        .switchRow{ display:flex; align-items:center; justify-content:space-between; gap:14px; }
+        .switchText{ min-width:0; }
+        .switchLabel{ font-weight:800; }
+        .switchHelper{ margin-top:4px; color:var(--muted); font-size:12px; line-height:1.35; }
+        .switch{
+          width:44px; height:26px;
+          border-radius:999px;
+          border:1px solid var(--border);
+          background: #f1f5f9;
+          position:relative;
+          cursor:pointer;
+          box-shadow: 0 6px 18px rgba(15,23,42,0.06);
+          flex: 0 0 auto;
         }
-        .alertTitle { font-weight: 950; }
-        .alertBody { margin-top: 6px; white-space: pre-wrap; color: #7f1d1d; font-size: 13px; }
-
-        .stack { margin-top: 16px; display: grid; gap: 14px; }
-
-        .panel {
-          padding: 14px;
-          border-radius: 20px;
-          border: 1px solid var(--border);
-          background: rgba(255,255,255,0.92);
-          box-shadow: 0 18px 60px rgba(15, 23, 42, 0.08);
+        .switch.on{ background: rgba(6,182,212,0.18); border-color: rgba(6,182,212,0.28); }
+        .knob{
+          position:absolute; top:3px; left:3px;
+          width:20px; height:20px; border-radius:999px;
+          background:#fff;
+          border:1px solid rgba(15,23,42,0.10);
+          transition: left 120ms ease;
         }
+        .switch.on .knob{ left:21px; background:#06B6D4; border-color: rgba(6,182,212,0.35); }
 
-        .panelHeader { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 14px; align-items: flex-start; }
-        .panelTitle { font-weight: 950; font-size: 15px; }
-        .panelSub { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.35; }
-
-        .actions { display: flex; gap: 10px; flex-wrap: wrap; }
-
-        .btnPrimary {
-          padding: 10px 14px;
-          border-radius: 14px;
-          border: 1px solid rgba(6,182,212,0.55);
+        .actions{ display:flex; gap:10px; flex-wrap:wrap; }
+        .btnPrimary{
+          padding:10px 14px;
+          border-radius:12px;
+          border:1px solid rgba(6,182,212,0.45);
           background: rgba(6,182,212,0.16);
-          color: var(--text);
-          font-weight: 950;
-          cursor: pointer;
-          box-shadow: 0 12px 26px rgba(15,23,42,0.08);
-        }
-        .btnPrimary:disabled { opacity: 0.55; cursor: not-allowed; }
-
-        .btnSecondary {
-          padding: 10px 14px;
-          border-radius: 14px;
-          border: 1px solid var(--border);
-          background: rgba(255,255,255,0.92);
-          color: var(--text);
-          font-weight: 900;
-          cursor: pointer;
-          box-shadow: 0 12px 26px rgba(15,23,42,0.08);
+          color:#0b4f5f;
+          font-weight:900;
+          cursor:pointer;
         }
 
-        .rowCard {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 14px;
-          padding: 12px;
-          border-radius: 18px;
-          border: 1px solid rgba(15,23,42,0.10);
-          background: rgba(255,255,255,0.98);
+        .dropZone{
+          margin-top:12px;
+          border-radius:16px;
+          border:1px dashed rgba(6,182,212,0.35);
+          background: rgba(6,182,212,0.03);
+          padding:12px;
+        }
+        .dropZone.over{
+          border-color: rgba(6,182,212,0.70);
+          background: rgba(6,182,212,0.06);
+        }
+        .dropHead{ display:flex; justify-content:space-between; gap:10px; padding-bottom:10px; }
+        .dropTitle{ font-weight:900; }
+        .dropSub{ color:var(--muted); font-size:12px; margin-top:4px; }
+        .dropBody{ padding-top:8px; }
+
+        .list{ display:grid; gap:10px; margin-top:12px; }
+        .listItem{
+          display:flex; align-items:center; justify-content:space-between; gap:12px;
+          padding:10px 12px;
+          border-radius:14px;
+          border:1px solid var(--border);
+          background: #ffffff;
+        }
+        .listSelect{
+          border:1px solid var(--border);
+          background:#fff;
+          border-radius:14px;
+          padding:10px 12px;
+          cursor:pointer;
+          text-align:left;
+          box-shadow: 0 6px 18px rgba(15,23,42,0.05);
+        }
+        .listSelect.active{ border-color: rgba(6,182,212,0.55); background: rgba(6,182,212,0.06); }
+        .row{ display:flex; justify-content:space-between; align-items:center; gap:12px; }
+        .rowMain{ min-width:0; }
+        .rowTitle{ font-weight:900; }
+        .rowSub{ margin-top:4px; color:var(--muted); font-size:12px; }
+
+        .rowCard{
+          display:flex; justify-content:space-between; align-items:center; gap:12px;
+          padding:12px;
+          border-radius:14px;
+          border:1px solid var(--border);
+          background:#fff;
         }
 
-        .gridTiles {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-          gap: 14px;
+        .chips{ display:flex; gap:10px; flex-wrap:wrap; padding-top:6px; }
+        .chip{
+          display:flex; align-items:center; gap:10px;
+          padding:8px 10px;
+          border-radius:999px;
+          border:1px solid var(--border);
+          background:#fff;
+        }
+        .chipX{
+          border:none;
+          background: rgba(239,68,68,0.10);
+          color:#b91c1c;
+          border-radius:999px;
+          width:22px;
+          height:22px;
+          cursor:pointer;
+          font-weight:900;
         }
 
-        .row {
-          display: flex;
-          gap: 14px;
-          align-items: flex-start;
-          flex-wrap: wrap;
-        }
+        .checkGrid{ display:grid; gap:8px; padding-top:6px; }
+        .checkRow{ display:flex; align-items:center; gap:10px; }
+        .checkText{ color: var(--text); font-size:13px; }
 
-        .tableShell { border-radius: 18px; border: 1px solid rgba(15,23,42,0.10); overflow: hidden; background: rgba(255,255,255,0.98); }
-        .tableHeader { display: flex; justify-content: space-between; gap: 10px; padding: 12px; border-bottom: 1px solid rgba(15,23,42,0.08); }
-        .tableEmpty { padding: 18px 12px; color: var(--muted); font-size: 13px; line-height: 1.5; }
-
-        .hint { margin-top: 10px; padding: 10px 12px; border-radius: 14px; border: 1px solid rgba(15,23,42,0.10); background: rgba(6,182,212,0.06); color: var(--muted); font-size: 12px; }
-
-        .foot { margin-top: 18px; padding: 14px 4px 0; }
+        .foot{ margin-top:18px; padding: 6px 4px 0; }
       `}</style>
     </div>
   );
