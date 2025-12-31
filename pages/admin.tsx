@@ -296,13 +296,36 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
   async function loadSettings() {
     const res = await fetch("/api/admin/settings");
     const data = await res.json();
-    setSettings(data);
-    // Map wired gmail_summary_enabled into skill config default
+
+    // Defensive defaults so older control-plane deployments don't break UI
+    const skills = (data && typeof data === "object" && data.skills_config && typeof data.skills_config === "object")
+      ? data.skills_config
+      : {};
+
+    const gmailSkill = (skills as any).gmail_summary || {};
+
+    setSettings({
+      ...data,
+      shortterm_memory_enabled: !!data.shortterm_memory_enabled,
+      longterm_memory_enabled: !!data.longterm_memory_enabled,
+    });
+
+    // Wire Gmail skill fields into the existing Skill Config panel
     setSkillCfg((cur) => ({
       ...cur,
-      gmail_summaries: { ...cur.gmail_summaries, enabled: !!data.gmail_summary_enabled },
+      gmail_summaries: {
+        ...cur.gmail_summaries,
+        enabled: !!data.gmail_summary_enabled,
+        addToGreeting: !!gmailSkill.add_to_greeting,
+        engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("\n") : "",
+        llmPrompt: typeof gmailSkill.llm_prompt === "string" ? gmailSkill.llm_prompt : "",
+      },
     }));
+
+    // Wire memory engagement phrases (one per line in UI)
+    setMemoryEngagementPrompt(Array.isArray(data.memory_engagement_phrases) ? data.memory_engagement_phrases.join("\n") : "");
   }
+
 
   async function loadAccounts() {
     setAccountsLoading(true);
