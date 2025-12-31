@@ -352,14 +352,12 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 
     // Normalize phrase lists from textarea inputs (one phrase per line)
     const gmailEngagementPhrases = (skillCfg.gmail_summaries.engagementPrompt || "")
-      .split("
-")
+      .split("\n")
       .map((s) => s.trim())
       .filter(Boolean);
 
     const memoryPhrases = (memoryEngagementPrompt || "")
-      .split("
-")
+      .split("\n")
       .map((s) => s.trim())
       .filter(Boolean);
 
