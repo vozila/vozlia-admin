@@ -2,7 +2,7 @@ import type { GetServerSidePropsContext } from "next";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSession } from "next-auth/react";
 import { RenderLogsPanel } from "../components/RenderLogsPanel";
-
+ 
 type EmailAccount = {
   id: string;
   provider_type: string;
