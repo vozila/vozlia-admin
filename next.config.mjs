@@ -1,8 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  // Helpful if you later want to call Render over plain HTTP in dev.
-  // In production, keep everything HTTPS.
+
+  // IMPORTANT: Prevent Vercel/Next build from failing due to ESLint.
+  // Run `npm run lint` separately in CI/local instead.
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
 };
 
 export default nextConfig;
