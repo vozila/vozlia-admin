@@ -412,14 +412,12 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
           ...cur.gmail_summaries,
           enabled: !!data.gmail_summary_enabled,
           addToGreeting: !!gmailSkill.add_to_greeting,
-          engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("
-") : "",
+          engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("\n") : "",
           llmPrompt: typeof gmailSkill.llm_prompt === "string" ? gmailSkill.llm_prompt : "",
         },
       }));
 
-      setMemoryEngagementPrompt(Array.isArray(data.memory_engagement_phrases) ? data.memory_engagement_phrases.join("
-") : "");
+      setMemoryEngagementPrompt(Array.isArray(data.memory_engagement_phrases) ? data.memory_engagement_phrases.join("\n") : "");
     } catch (e: unknown) {
       setError(String((e as any)?.message ?? e));
     } finally {
