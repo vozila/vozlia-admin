@@ -234,7 +234,7 @@ export default function AdminPage() {
     skills: false,
     playbooks: false,
     templates: false,
-    memory: false,
+    agentMemory: false,
     chitchat: false,
     logging: false,
     email: false,
@@ -274,6 +274,23 @@ export default function AdminPage() {
     { id: "tpl-1", name: "Default Agent Program", enabled: true, sequence: [{ kind: "playbook", id: "pb-1" }] },
   ]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("tpl-1");
+
+// Agent Memory (concept UI; wiring next)
+const [memoryEngagementPrompt, setMemoryEngagementPrompt] = useState<string>("");
+const [memorySearch, setMemorySearch] = useState<string>("");
+
+// Chit-Chat (concept)
+const [chitchatDelaySec, setChitchatDelaySec] = useState<string>("2.0");
+
+// Logging toggles (concept)
+const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
+  REALTIME_LOG_STATS: true,
+  REALTIME_LOG_DELTAS: false,
+  REALTIME_LOG_TEXT: false,
+  REALTIME_LOG_ALL_EVENTS: false,
+  OBS_ENABLED: false,
+  OBS_LOG_JSON: false,
+});
 
   // Wired loading
   async function loadSettings() {
@@ -333,6 +350,33 @@ export default function AdminPage() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function patchAccount(id: string, patch: Partial<EmailAccount>) {
+    setError(null);
+    try {
+      const res = await fetch(`/api/admin/email-accounts/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to update email account");
+      await loadAccounts();
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    }
+  }
+
+  async function setPrimaryAccount(id: string) {
+    const updates = accounts
+      .filter((a) => a.provider_type === "gmail")
+      .map((a) => patchAccount(a.id, { is_primary: a.id === id }));
+    await Promise.all(updates);
+  }
+
+  async function toggleAccountActive(id: string, nextActive: boolean) {
+    await patchAccount(id, { is_active: nextActive });
   }
 
   function appendToGreetingNote(key: SkillKey): string {
@@ -744,34 +788,302 @@ export default function AdminPage() {
           </SectionRow>
 
           <SectionRow
-            title="Email Accounts"
-            subtitle="Connected Gmail accounts. These IDs map to Gmail Summaries inbox selection."
-            open={open.email}
-            onToggle={() => setOpen((p) => ({ ...p, email: !p.email }))}
-          >
-            <div className="panel">
-              {accountsLoading ? (
-                <div className="muted">Loading…</div>
-              ) : gmailAccounts.length === 0 ? (
-                <div className="muted">No Gmail accounts found.</div>
-              ) : (
-                <div className="list">
-                  {gmailAccounts.map((a) => (
-                    <div key={a.id} className="rowCard">
-                      <div>
-                        <div className="rowTitle">{a.email_address || a.display_name || a.id}</div>
-                        <div className="rowSub">
-                          <span className="mono">{a.id}</span> · {a.is_primary ? "Primary" : "Secondary"} · {a.is_active ? "Active" : "Inactive"}
-                        </div>
-                      </div>
-                      <span className={`pill ${a.is_active ? "pillOn" : "pillOff"}`}>{a.is_active ? "Active" : "Inactive"}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </SectionRow>
+  title="Agent Memory"
+  subtitle="Short-term + long-term toggles, engagement prompt, and Memory Bank (concept DB view)."
+  open={open.agentMemory}
+  onToggle={() => setOpen((p) => ({ ...p, agentMemory: !p.agentMemory }))}
+>
+  <div className="panel">
+    <div className="panelTitle">Memory</div>
+    <div className="panelSub">
+      These controls will be wired to the control plane next. Today they act as concept UI and do not affect runtime unless your backend already reads these settings.
+    </div>
 
+    <div className="form" style={{ marginTop: 12 }}>
+      <Switch
+        checked={!!settings.shortterm_memory_enabled}
+        onChange={(v) => setSettings((p: any) => ({ ...p, shortterm_memory_enabled: v }))}
+        label="Enable Short-Term Memory"
+        helper="Concept now; wiring comes next."
+      />
+
+      <Switch
+        checked={!!settings.longterm_memory_enabled}
+        onChange={(v) => setSettings((p: any) => ({ ...p, longterm_memory_enabled: v }))}
+        label="Enable Long-Term Memory"
+        helper="Concept now; wiring comes next."
+      />
+
+      <TextField
+        label="Engagement Prompt"
+        value={memoryEngagementPrompt}
+        onChange={setMemoryEngagementPrompt}
+        placeholder='Example: "If the caller mentions personal preferences, store them and recall later."'
+        helper="Phrases / routing hints to tell the FSM when to consult long-term memory. (Concept)"
+      />
+    </div>
+  </div>
+
+  <div className="panel" style={{ marginTop: 14 }}>
+    <div className="panelTitle">Memory Bank</div>
+    <div className="panelSub">Search and browse long-term memory entries. (Concept display; API wiring next.)</div>
+
+    <div style={{ marginTop: 12 }}>
+      <TextField
+        label="Search"
+        value={memorySearch}
+        onChange={setMemorySearch}
+        placeholder="Search memories…"
+      />
+    </div>
+
+    <div style={{ marginTop: 12, overflowX: "auto" }}>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Created</th>
+            <th>Type</th>
+            <th>Key</th>
+            <th>Value</th>
+            <th>Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(() => {
+            const rows: any[] = Array.isArray(settings.memory_bank_preview) ? settings.memory_bank_preview : [];
+            const q = memorySearch.trim().toLowerCase();
+            const filtered = q
+              ? rows.filter((r) => JSON.stringify(r).toLowerCase().includes(q))
+              : rows;
+            if (filtered.length === 0) {
+              return (
+                <tr>
+                  <td colSpan={5} className="muted" style={{ padding: 12 }}>
+                    No entries to display. (This table will populate once the Memory Bank API is wired.)
+                  </td>
+                </tr>
+              );
+            }
+            return filtered.slice(0, 200).map((r, i) => (
+              <tr key={i}>
+                <td>{r.created_at || "—"}</td>
+                <td>{r.type || "—"}</td>
+                <td className="mono">{r.key || "—"}</td>
+                <td>{r.value || "—"}</td>
+                <td className="mono">{r.source || "—"}</td>
+              </tr>
+            ));
+          })()}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</SectionRow>
+
+<SectionRow
+  title="Chit-Chat"
+  subtitle="Controls for chitchat behavior (dead air response delay)."
+  open={open.chitchat}
+  onToggle={() => setOpen((p) => ({ ...p, chitchat: !p.chitchat }))}
+>
+  <div className="panel">
+    <div className="panelTitle">Chit-Chat</div>
+    <div className="panelSub">Concept UI — we will wire these settings to the control plane next.</div>
+
+    <div className="form" style={{ marginTop: 12 }}>
+      <TextField
+        label="Response Delay Time"
+        value={chitchatDelaySec}
+        onChange={setChitchatDelaySec}
+        placeholder="2.0"
+        helper="Time of dead air (seconds) before Vozlia responds in chitchat mode. (Concept)"
+      />
+    </div>
+  </div>
+</SectionRow>
+
+<SectionRow
+  title="Logging"
+  subtitle="Toggle logging verbosity. Keep hot-path logging minimal in production."
+  open={open.logging}
+  onToggle={() => setOpen((p) => ({ ...p, logging: !p.logging }))}
+>
+  <div className="panel">
+    <div className="panelTitle">Logging</div>
+    <div className="panelSub">
+      Concept UI. We’ll wire these toggles to env/config and propagate to the backend. Prefer realtime stats only (avoid per-frame deltas).
+    </div>
+
+    <div className="form" style={{ marginTop: 12 }}>
+      {Object.keys(logToggles).map((k) => (
+        <Switch
+          key={k}
+          checked={!!logToggles[k]}
+          onChange={(v) => setLogToggles((cur) => ({ ...cur, [k]: v }))}
+          label={k}
+          helper={k === "REALTIME_LOG_DELTAS" ? "Avoid in production; can impact hot path." : undefined}
+        />
+      ))}
+    </div>
+  </div>
+</SectionRow>
+
+<SectionRow
+  title="Email Accounts"
+  subtitle="Connected Gmail accounts + controls for which inbox Gmail Summaries uses."
+  open={open.email}
+  onToggle={() => setOpen((p) => ({ ...p, email: !p.email }))}
+>
+  <div className="panel">
+    <div className="panelTitle">Gmail Summaries Inbox Selection (wired)</div>
+    <div className="panelSub">
+      These two settings determine which email Gmail Summaries uses. This section duplicates the controls in the Gmail skill tile so it’s easy to find.
+    </div>
+
+    <div className="form" style={{ marginTop: 12 }}>
+      <div className="field">
+        <div className="fieldLabel">Default Inbox</div>
+        <div className="fieldHelper">
+          Maps to <span className="mono">gmail_account_id</span>. Used as the default inbox for summaries.
+        </div>
+        <select
+          className="input"
+          value={settings.gmail_account_id || ""}
+          onChange={(e) => setSettings((p: any) => ({ ...p, gmail_account_id: e.target.value }))}
+          disabled={accountsLoading}
+        >
+          <option value="">(not set)</option>
+          {gmailActiveAccounts.map((a) => (
+            <option key={a.id} value={a.id}>
+              {(a.email_address || a.display_name || a.id) + (a.is_primary ? " (primary)" : "")}
+            </option>
+          ))}
+        </select>
+
+        <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            className="btnSecondary"
+            onClick={() => {
+              const primary = gmailAccounts.find((a) => a.is_primary && a.is_active);
+              if (primary) setSettings((p: any) => ({ ...p, gmail_account_id: primary.id }));
+            }}
+            disabled={accountsLoading}
+          >
+            Use Primary Inbox as Default
+          </button>
+
+          <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
+            {saving ? "Saving…" : "Save Inbox Settings"}
+          </button>
+        </div>
+      </div>
+
+      <div className="field">
+        <div className="fieldLabel">Enabled Inboxes (multi-inbox)</div>
+        <div className="fieldHelper">
+          Maps to <span className="mono">gmail_enabled_account_ids</span>. You can enable multiple inboxes to include in summaries.
+        </div>
+
+        <div className="checkGrid">
+          {gmailActiveAccounts.map((a) => {
+            const enabled: string[] = Array.isArray(settings.gmail_enabled_account_ids)
+              ? settings.gmail_enabled_account_ids
+              : [];
+            const checked = enabled.includes(a.id);
+            return (
+              <label key={a.id} className="checkRow">
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => {
+                    const next = checked ? enabled.filter((x) => x !== a.id) : [...enabled, a.id];
+                    setSettings((p: any) => ({ ...p, gmail_enabled_account_ids: next }));
+                  }}
+                />
+                <span className="checkText">
+                  {a.email_address || a.display_name || a.id}{" "}
+                  <span className="muted mono" style={{ marginLeft: 6 }}>
+                    {a.id}
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+          {gmailActiveAccounts.length === 0 ? <div className="muted">No active Gmail accounts found.</div> : null}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div className="panel" style={{ marginTop: 14 }}>
+    <div className="panelTitle">Connected Gmail Accounts</div>
+    <div className="panelSub">
+      Primary/Active flags are stored on the email account records. Primary does not automatically change Gmail Summaries default inbox unless you set it above.
+    </div>
+
+    <div style={{ marginTop: 12 }}>
+      {accountsLoading ? (
+        <div className="muted">Loading…</div>
+      ) : gmailAccounts.length === 0 ? (
+        <div className="muted">No Gmail accounts found.</div>
+      ) : (
+        <div className="list">
+          {gmailAccounts.map((a) => (
+            <div key={a.id} className="rowCard">
+              <div style={{ minWidth: 0 }}>
+                <div className="rowTitle">{a.email_address || a.display_name || a.id}</div>
+                <div className="rowSub">
+                  <span className="mono">{a.id}</span> · {a.is_primary ? "Primary" : "Secondary"} ·{" "}
+                  {a.is_active ? "Active" : "Inactive"}
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                <span className={`pill ${a.is_active ? "pillOn" : "pillOff"}`}>{a.is_active ? "Active" : "Inactive"}</span>
+
+                <button
+                  className={a.is_primary ? "btnPrimary" : "btnSecondary"}
+                  type="button"
+                  onClick={() => setPrimaryAccount(a.id)}
+                  disabled={accountsLoading}
+                >
+                  {a.is_primary ? "Primary" : "Make Primary"}
+                </button>
+
+                <button
+                  className="btnSecondary"
+                  type="button"
+                  onClick={() => toggleAccountActive(a.id, !a.is_active)}
+                  disabled={accountsLoading}
+                >
+                  {a.is_active ? "Disable" : "Enable"}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+
+    <div className="actions" style={{ marginTop: 12 }}>
+      <button
+        className="btnSecondary"
+        type="button"
+        onClick={async () => {
+          try {
+            setError(null);
+            await Promise.all([loadSettings(), loadAccounts()]);
+          } catch (e: any) {
+            setError(e?.message || String(e));
+          }
+        }}
+      >
+        Refresh
+      </button>
+    </div>
+  </div>
+</SectionRow>
           <SectionRow
             title="Render Logs"
             subtitle="Live logs fetched from Render."
@@ -974,6 +1286,42 @@ export default function AdminPage() {
           font-weight:900;
           cursor:pointer;
         }
+
+.btnSecondary{
+  padding:10px 14px;
+  border-radius:14px;
+  border:1px solid var(--border);
+  background:#fff;
+  color:var(--text);
+  font-weight:800;
+  cursor:pointer;
+  box-shadow: var(--shadow);
+}
+.btnSecondary:hover{ border-color: rgba(6,182,212,0.35); background: rgba(6,182,212,0.04); }
+
+.table{
+  width:100%;
+  border-collapse:separate;
+  border-spacing:0;
+  font-size:13px;
+}
+.table th, .table td{
+  padding:10px 12px;
+  border-bottom:1px solid var(--border);
+  text-align:left;
+  vertical-align:top;
+  background:#fff;
+}
+.table th{
+  position:sticky;
+  top:0;
+  background: rgba(246,249,255,0.9);
+  backdrop-filter: blur(6px);
+  font-size:12px;
+  letter-spacing:0.02em;
+  text-transform:uppercase;
+  color: var(--muted);
+}
 
         .dropZone{
           margin-top:12px;
