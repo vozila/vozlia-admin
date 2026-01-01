@@ -534,8 +534,7 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
       })(),
 
       // NEW: Greeting priority order (skill IDs)
-      skills_priority_order: greetingPriority.map((k) => SKILL_ID_BY_KEY[k]),
-      },
+      skills_priority_order: greetingPriority.map((k) => SKILL_ID_BY_KEY[k]),,
 
       // NEW: Memory wiring
       shortterm_memory_enabled: !!settings.shortterm_memory_enabled,
@@ -568,7 +567,14 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
           ...cur.gmail_summaries,
           enabled: !!data.gmail_summary_enabled,
           addToGreeting: !!gmailSkill.add_to_greeting,
-          engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("\n") : "",
+          autoExecuteAfterGreeting: !!gmailSkill.auto_execute_after_greeting,
+          engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("
+") : "",
+          kickoffPhrases: Array.isArray(gmailSkill.kickoff_phrases)
+            ? gmailSkill.kickoff_phrases.join("
+")
+            : (Array.isArray(gmailSkill.standby_phrases) ? gmailSkill.standby_phrases.join("
+") : ""),
           llmPrompt: typeof gmailSkill.llm_prompt === "string" ? gmailSkill.llm_prompt : "",
         },
       }));
