@@ -568,13 +568,10 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
           enabled: !!data.gmail_summary_enabled,
           addToGreeting: !!gmailSkill.add_to_greeting,
           autoExecuteAfterGreeting: !!gmailSkill.auto_execute_after_greeting,
-          engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("
-") : "",
+          engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("\n") : "",
           kickoffPhrases: Array.isArray(gmailSkill.kickoff_phrases)
-            ? gmailSkill.kickoff_phrases.join("
-")
-            : (Array.isArray(gmailSkill.standby_phrases) ? gmailSkill.standby_phrases.join("
-") : ""),
+            ? gmailSkill.kickoff_phrases.join("\n")
+            : (Array.isArray(gmailSkill.standby_phrases) ? gmailSkill.standby_phrases.join("\n") : ""),
           llmPrompt: typeof gmailSkill.llm_prompt === "string" ? gmailSkill.llm_prompt : "",
         },
       }));
