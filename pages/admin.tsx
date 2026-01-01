@@ -258,7 +258,15 @@ export default function AdminPage() {
   const [activeSkill, setActiveSkill] = useState<SkillKey | null>(null);
 
   // Skill config (concept fields)
-  const [skillCfg, setSkillCfg] = useState<Record<SkillKey, { enabled: boolean; addToGreeting: boolean; engagementPrompt: string; llmPrompt: string }>>({
+  type SkillCfgState = {
+    enabled: boolean;
+    addToGreeting: boolean;
+    autoExecuteAfterGreeting: boolean;
+    engagementPrompt: string;
+    llmPrompt: string;
+  };
+
+  const [skillCfg, setSkillCfg] = useState<Record<SkillKey, SkillCfgState>>({
     gmail_summaries: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
     sms: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
     calendar: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
@@ -411,8 +419,7 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
         const out: any = {};
         const parseLines = (v: string) =>
           (v || "")
-            .split("
-")
+            .split("\n")
             .map((s) => s.trim())
             .filter(Boolean);
 
@@ -439,8 +446,6 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 
       // NEW: Greeting priority order (skill IDs)
       skills_priority_order: greetingPriority.map((k) => SKILL_ID_BY_KEY[k]),
-      },
-
       // NEW: Memory wiring
       shortterm_memory_enabled: !!settings.shortterm_memory_enabled,
       longterm_memory_enabled: !!settings.longterm_memory_enabled,
@@ -472,6 +477,7 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
           ...cur.gmail_summaries,
           enabled: !!data.gmail_summary_enabled,
           addToGreeting: !!gmailSkill.add_to_greeting,
+          autoExecuteAfterGreeting: !!gmailSkill.auto_execute_after_greeting,
           engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("\n") : "",
           llmPrompt: typeof gmailSkill.llm_prompt === "string" ? gmailSkill.llm_prompt : "",
         },
@@ -514,7 +520,9 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
   }
 
   function appendToGreetingNote(key: SkillKey): string {
-    return skillCfg[key].addToGreeting ? "Auto-runs after greeting" : "Runs on demand";
+    if (skillCfg[key].autoExecuteAfterGreeting) return "Auto-exec after greeting";
+    if (skillCfg[key].addToGreeting) return "Announced in greeting";
+    return "Runs on demand";
   }
 
   return (
