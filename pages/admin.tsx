@@ -258,13 +258,13 @@ export default function AdminPage() {
   const [activeSkill, setActiveSkill] = useState<SkillKey | null>(null);
 
   // Skill config (concept fields)
-  const [skillCfg, setSkillCfg] = useState<Record<SkillKey, { enabled: boolean; addToGreeting: boolean; autoExecuteAfterGreeting: boolean; engagementPrompt: string; llmPrompt: string; standbyPhrases: string }>>({
-    gmail_summaries: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "", standbyPhrases: "" },
-    sms: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "", standbyPhrases: "" },
-    calendar: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "", standbyPhrases: "" },
-    web_search: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "", standbyPhrases: "" },
-    weather: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "", standbyPhrases: "" },
-    investment_reporting: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "", standbyPhrases: "" },
+  const [skillCfg, setSkillCfg] = useState<Record<SkillKey, { enabled: boolean; addToGreeting: boolean; engagementPrompt: string; llmPrompt: string }>>({
+    gmail_summaries: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
+    sms: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
+    calendar: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
+    web_search: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
+    weather: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
+    investment_reporting: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
   });
 
   // Greeting priority list (admin configurable)
@@ -295,7 +295,8 @@ const [memorySearch, setMemorySearch] = useState<string>("");
 
 // Chit-Chat (concept)
 const [chitchatDelaySec, setChitchatDelaySec] = useState<string>("2.0");
-  const [personaVoice, setPersonaVoice] = useState<string>("alloy");
+const [personaVoice, setPersonaVoice] = useState<string>("marin");
+
 
 // Logging toggles (concept)
 const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
@@ -311,17 +312,16 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
   async function loadSettings() {
     const res = await fetch("/api/admin/settings");
     const data = await res.json();
-      // Wired: Chit-chat delay + persona voice + logging toggles
-      if (typeof (data as any).chitchat_response_delay_sec === "number") {
-        setChitchatDelaySec(String((data as any).chitchat_response_delay_sec));
-      }
-      if (typeof (data as any).persona_voice === "string" && (data as any).persona_voice) {
-        setPersonaVoice((data as any).persona_voice);
-      }
-      if ((data as any).logging_toggles && typeof (data as any).logging_toggles === "object") {
-        setLogToggles((prev) => ({ ...prev, ...(data as any).logging_toggles }));
-      }
 
+    // Wired: Chit-chat settings
+    const delayVal: any = (data as any).chitchat_response_delay_sec;
+    if (typeof delayVal === "number" || typeof delayVal === "string") {
+      setChitchatDelaySec(String(delayVal));
+    }
+    const pv: any = (data as any).persona_voice;
+    if (typeof pv === "string" && pv.trim()) {
+      setPersonaVoice(pv.trim());
+    }
 
     // Defensive defaults so older control-plane deployments don't break UI
     const skills = (data && typeof data === "object" && data.skills_config && typeof data.skills_config === "object")
@@ -364,6 +364,9 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
           addToGreeting: !!cfg.add_to_greeting,
           autoExecuteAfterGreeting: !!cfg.auto_execute_after_greeting,
           engagementPrompt: Array.isArray(cfg.engagement_phrases) ? cfg.engagement_phrases.join("\n") : "",
+          kickoffPhrases: Array.isArray(cfg.kickoff_phrases)
+            ? cfg.kickoff_phrases.join("\n")
+            : (Array.isArray((cfg as any).standby_phrases) ? (cfg as any).standby_phrases.join("\n") : ""),
           llmPrompt: typeof cfg.llm_prompt === "string" ? cfg.llm_prompt : "",
         };
       }
@@ -374,6 +377,33 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
   }
 
 
+
+
+  async function saveChitchatSettings() {
+    setSaving(true);
+    setError(null);
+    try {
+      const delayNum = Number(chitchatDelaySec);
+      const payload: any = {
+        chitchat_response_delay_sec: Number.isFinite(delayNum) ? delayNum : 0,
+        persona_voice: personaVoice,
+      };
+      const res = await fetch("/api/admin/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || `Failed to save (status ${res.status})`);
+      }
+      await loadSettings();
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
   async function loadAccounts() {
     setAccountsLoading(true);
     const res = await fetch("/api/admin/email-accounts");
@@ -435,6 +465,9 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
             add_to_greeting: !!cfg.addToGreeting,
             auto_execute_after_greeting: !!cfg.autoExecuteAfterGreeting,
             engagement_phrases: parseLines(cfg.engagementPrompt || ""),
+            kickoff_phrases: parseLines((cfg as any).kickoffPhrases || ""),
+            // Back-compat: older backend uses standby_phrases
+            standby_phrases: parseLines((cfg as any).kickoffPhrases || ""),
             llm_prompt: cfg.llmPrompt || "",
           };
         });
@@ -483,10 +516,8 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
           ...cur.gmail_summaries,
           enabled: !!data.gmail_summary_enabled,
           addToGreeting: !!gmailSkill.add_to_greeting,
-          autoExecuteAfterGreeting: !!(gmailSkill as any).auto_execute_after_greeting,
           engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("\n") : "",
           llmPrompt: typeof gmailSkill.llm_prompt === "string" ? gmailSkill.llm_prompt : "",
-          standbyPhrases: Array.isArray((gmailSkill as any).standby_phrases) ? ((gmailSkill as any).standby_phrases as any[]).join("\n") : "",
         },
       }));
 
@@ -697,6 +728,22 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                   />
 
                   <TextField
+                    label="Kickoff phrases"
+                    value={skillCfg[activeSkill].kickoffPhrases}
+                    onChange={(v) =>
+                      setSkillCfg((cur) => ({
+                        ...cur,
+                        [activeSkill]: { ...cur[activeSkill], kickoffPhrases: v },
+                      }))
+                    }
+                    placeholder={activeSkill === "gmail_summaries"
+                      ? "One per line, e.g.\nOne moment — I\'m pulling up your inbox.\nPlease stand by while I retrieve your email summaries."
+                      : "One per line, e.g.\nChecking that now…\nOne moment please…"}
+                    helper="Spoken immediately when this skill begins (before slow API/tool work)."
+                    multiline
+                  />
+
+                  <TextField
                     label="LLM Prompt"
                     value={skillCfg[activeSkill].llmPrompt}
                     onChange={(v) => setSkillCfg((cur) => ({ ...cur, [activeSkill]: { ...cur[activeSkill], llmPrompt: v } }))}
@@ -705,18 +752,11 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                     multiline
                   />
 
-                  {activeSkill === "gmail_summaries" && (
-                    <TextField
-                      label="Standby phrases (one per line)"
-                      value={skillCfg[activeSkill].standbyPhrases}
-                      onChange={(v) =>
-                        setSkillCfg((cur) => ({ ...cur, [activeSkill]: { ...cur[activeSkill], standbyPhrases: v } }))
-                      }
-                      placeholder={"Please stand by while I retrieve your email summaries.\nOne moment — I’m pulling up your inbox now."}
-                      helper="Used as the kickoff line when Gmail Summaries auto-executes after greeting (no 'Sure', no 'Got it')."
-                      multiline
-                    />
-                  )}
+                  <div style={{ marginTop: 12 }}>
+                    <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
+                      {saving ? "Saving…" : "Save Skill Settings"}
+                    </button>
+                  </div>
 
                   {activeSkill === "gmail_summaries" ? (
                     <div className="panelInset">
@@ -1070,7 +1110,7 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 >
   <div className="panel">
     <div className="panelTitle">Chit-Chat</div>
-    <div className="panelSub">Concept UI — we will wire these settings to the control plane next.</div>
+    <div className="panelSub">Wired: chitchat response delay + persona voice.</div>
 
     <div className="form" style={{ marginTop: 12 }}>
       <TextField
@@ -1078,29 +1118,36 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
         value={chitchatDelaySec}
         onChange={setChitchatDelaySec}
         placeholder="2.0"
-        helper="Time of dead air (seconds) before Vozlia responds in chitchat mode. "
+        helper="Time of dead air (seconds) before Vozlia responds in chitchat mode. (Concept)"
       />
-      <div style={{ marginTop: 10 }}>
-        <div className="label">Persona Voice</div>
+
+      <div className="field">
+        <div className="fieldLabel">Persona Voice</div>
         <select
-          className="input"
+          className="select"
           value={personaVoice}
           onChange={(e) => setPersonaVoice(e.target.value)}
         >
-          {["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"].map((v) => (
-            <option key={v} value={v}>
-              {v}
-            </option>
-          ))}
+          <option value="marin">marin (recommended)</option>
+          <option value="cedar">cedar (recommended)</option>
+          <option value="alloy">alloy</option>
+          <option value="ash">ash</option>
+          <option value="ballad">ballad</option>
+          <option value="coral">coral</option>
+          <option value="echo">echo</option>
+          <option value="sage">sage</option>
+          <option value="shimmer">shimmer</option>
+          <option value="verse">verse</option>
         </select>
-        <div className="helper">Voice is applied when the next call session starts.</div>
+        <div className="fieldHelper">Applied on the next call session (voice cannot be changed mid-session).</div>
       </div>
 
       <div style={{ marginTop: 12 }}>
-        <button className="btnPrimary" onClick={saveWiredSettings}>
-          Save Chit-Chat Settings
+        <button type="button" className="btnPrimary" disabled={saving} onClick={saveChitchatSettings}>
+          {saving ? "Saving…" : "Save Chit-Chat Settings"}
         </button>
       </div>
+
     </div>
   </div>
 </SectionRow>
@@ -1127,11 +1174,6 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
           helper={k === "REALTIME_LOG_DELTAS" ? "Avoid in production; can impact hot path." : undefined}
         />
       ))}
-    <div style={{ marginTop: 12 }}>
-      <button className="btnPrimary" onClick={saveWiredSettings}>
-        Save Logging Settings
-      </button>
-    </div>
     </div>
   </div>
 </SectionRow>
@@ -1622,7 +1664,3 @@ export async function getServerSideProps(ctx: GetServerSidePropsContext) {
   }
   return { props: { session } };
 }
-      ,
-      chitchat_response_delay_sec: Number(chitchatDelaySec || "0"),
-      persona_voice: personaVoice,
-      logging_toggles: logToggles,
