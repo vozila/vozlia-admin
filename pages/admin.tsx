@@ -257,15 +257,67 @@ export default function AdminPage() {
 
   const [activeSkill, setActiveSkill] = useState<SkillKey | null>(null);
 
-  // Skill config (concept fields)
-  const [skillCfg, setSkillCfg] = useState<Record<SkillKey, { enabled: boolean; addToGreeting: boolean; engagementPrompt: string; llmPrompt: string }>>({
-    gmail_summaries: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
-    sms: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
-    calendar: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
-    web_search: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
-    weather: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
-    investment_reporting: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", kickoffPhrases: "", llmPrompt: "" },
-  });
+ // Skill config (concept fields)
+type SkillCfgState = {
+  enabled: boolean;
+  addToGreeting: boolean;
+  autoExecuteAfterGreeting: boolean;
+  engagementPrompt: string;
+  kickoffPhrases: string;
+  llmPrompt: string;
+};
+
+const [skillCfg, setSkillCfg] = useState<Record<SkillKey, SkillCfgState>>({
+  gmail_summaries: {
+    enabled: false,
+    addToGreeting: false,
+    autoExecuteAfterGreeting: false,
+    engagementPrompt: "",
+    kickoffPhrases: "",
+    llmPrompt: "",
+  },
+  sms: {
+    enabled: false,
+    addToGreeting: false,
+    autoExecuteAfterGreeting: false,
+    engagementPrompt: "",
+    kickoffPhrases: "",
+    llmPrompt: "",
+  },
+  calendar: {
+    enabled: false,
+    addToGreeting: false,
+    autoExecuteAfterGreeting: false,
+    engagementPrompt: "",
+    kickoffPhrases: "",
+    llmPrompt: "",
+  },
+  web_search: {
+    enabled: false,
+    addToGreeting: false,
+    autoExecuteAfterGreeting: false,
+    engagementPrompt: "",
+    kickoffPhrases: "",
+    llmPrompt: "",
+  },
+  weather: {
+    enabled: false,
+    addToGreeting: false,
+    autoExecuteAfterGreeting: false,
+    engagementPrompt: "",
+    kickoffPhrases: "",
+    llmPrompt: "",
+  },
+  investment_reporting: {
+    enabled: false,
+    addToGreeting: false,
+    autoExecuteAfterGreeting: false,
+    engagementPrompt: "",
+    kickoffPhrases: "",
+    llmPrompt: "",
+  },
+});
+
 
   // Greeting priority list (admin configurable)
   const [greetingPriority, setGreetingPriority] = useState<SkillKey[]>([
