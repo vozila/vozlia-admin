@@ -15,6 +15,20 @@ type EmailAccount = {
 
 type SkillKey = "gmail_summaries" | "sms" | "calendar" | "web_search" | "weather" | "investment_reporting";
 
+const SKILL_ID_BY_KEY: Record<SkillKey, string> = {
+  gmail_summaries: "gmail_summary",
+  sms: "sms",
+  calendar: "calendar",
+  web_search: "web_search",
+  weather: "weather",
+  investment_reporting: "investment_reporting",
+};
+
+const KEY_BY_SKILL_ID: Record<string, SkillKey> = Object.fromEntries(
+  Object.entries(SKILL_ID_BY_KEY).map(([k, sid]) => [sid, k as SkillKey])
+) as Record<string, SkillKey>;
+
+
 type TemplateItem =
   | { kind: "skill"; key: SkillKey }
   | { kind: "playbook"; id: string };
@@ -245,12 +259,12 @@ export default function AdminPage() {
 
   // Skill config (concept fields)
   const [skillCfg, setSkillCfg] = useState<Record<SkillKey, { enabled: boolean; addToGreeting: boolean; engagementPrompt: string; llmPrompt: string }>>({
-    gmail_summaries: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
-    sms: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
-    calendar: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
-    web_search: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
-    weather: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
-    investment_reporting: { enabled: false, addToGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    gmail_summaries: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    sms: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    calendar: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    web_search: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    weather: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    investment_reporting: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
   });
 
   // Greeting priority list (admin configurable)
@@ -304,24 +318,45 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 
     const gmailSkill = (skills as any).gmail_summary || {};
 
+    // Greeting priority order (skill IDs from control plane)
+    const prio = Array.isArray((data as any).skills_priority_order) ? ((data as any).skills_priority_order as string[]) : [];
+    if (prio.length) {
+      const mapped: SkillKey[] = [];
+      for (const sid of prio) {
+        const k = KEY_BY_SKILL_ID[sid];
+        if (k) mapped.push(k);
+      }
+      // Append any missing skills (stable)
+      const all: SkillKey[] = ["gmail_summaries", "sms", "calendar", "web_search", "weather", "investment_reporting"];
+      const finalOrder = [...mapped, ...all.filter((k) => !mapped.includes(k))];
+      setGreetingPriority(finalOrder);
+    }
+
     setSettings({
       ...data,
       shortterm_memory_enabled: !!data.shortterm_memory_enabled,
       longterm_memory_enabled: !!data.longterm_memory_enabled,
     });
 
-    // Wire Gmail skill fields into the existing Skill Config panel
-    setSkillCfg((cur) => ({
-      ...cur,
-      gmail_summaries: {
-        ...cur.gmail_summaries,
-        enabled: !!data.gmail_summary_enabled,
-        addToGreeting: !!gmailSkill.add_to_greeting,
-        engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("\n") : "",
-        llmPrompt: typeof gmailSkill.llm_prompt === "string" ? gmailSkill.llm_prompt : "",
-      },
-    }));
+    // Wire skill fields into the Skill Config panel (multi-skill; safe defaults)
+    setSkillCfg((cur) => {
+      const next: any = { ...cur };
+      const skillsObj: any = skills || {};
 
+      for (const key of Object.keys(SKILL_ID_BY_KEY) as SkillKey[]) {
+        const sid = SKILL_ID_BY_KEY[key];
+        const cfg = skillsObj[sid] || {};
+        next[key] = {
+          ...next[key],
+          enabled: key === "gmail_summaries" ? !!(data as any).gmail_summary_enabled : !!cfg.enabled,
+          addToGreeting: !!cfg.add_to_greeting,
+          autoExecuteAfterGreeting: !!cfg.auto_execute_after_greeting,
+          engagementPrompt: Array.isArray(cfg.engagement_phrases) ? cfg.engagement_phrases.join("\n") : "",
+          llmPrompt: typeof cfg.llm_prompt === "string" ? cfg.llm_prompt : "",
+        };
+      }
+      return next;
+    });
     // Wire memory engagement phrases (one per line in UI)
     setMemoryEngagementPrompt(Array.isArray(data.memory_engagement_phrases) ? data.memory_engagement_phrases.join("\n") : "");
   }
@@ -371,14 +406,39 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
       gmail_account_id: settings.gmail_account_id,
       gmail_enabled_account_ids: settings.gmail_enabled_account_ids,
 
-      // NEW: Modular per-skill config (gmail_summary for now)
-      skills_config: {
-        gmail_summary: {
+      // NEW: Modular per-skill config (all skills; backend may choose to use subset)
+      skills_config: (() => {
+        const out: any = {};
+        const parseLines = (v: string) =>
+          (v || "")
+            .split("
+")
+            .map((s) => s.trim())
+            .filter(Boolean);
+
+        (Object.keys(SKILL_ID_BY_KEY) as SkillKey[]).forEach((key) => {
+          const sid = SKILL_ID_BY_KEY[key];
+          const cfg = (skillCfg as any)[key] || {};
+          out[sid] = {
+            enabled: !!cfg.enabled,
+            add_to_greeting: !!cfg.addToGreeting,
+            auto_execute_after_greeting: !!cfg.autoExecuteAfterGreeting,
+            engagement_phrases: parseLines(cfg.engagementPrompt || ""),
+            llm_prompt: cfg.llmPrompt || "",
+          };
+        });
+
+        // Mirror legacy gmail_summary_enabled into the skill as well
+        out.gmail_summary = {
+          ...(out.gmail_summary || {}),
           enabled: !!settings.gmail_summary_enabled,
-          add_to_greeting: !!skillCfg.gmail_summaries.addToGreeting,
-          engagement_phrases: gmailEngagementPhrases,
-          llm_prompt: skillCfg.gmail_summaries.llmPrompt || "",
-        },
+        };
+
+        return out;
+      })(),
+
+      // NEW: Greeting priority order (skill IDs)
+      skills_priority_order: greetingPriority.map((k) => SKILL_ID_BY_KEY[k]),
       },
 
       // NEW: Memory wiring
@@ -598,8 +658,21 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                       }))
                     }
                     label="Add to greeting"
-                    helper="When enabled, the agent runs this skill immediately after the greeting (as if requested)."
+                    helper="When enabled, the agent announces this skill in the greeting (discovery only)."
                   />
+
+                  <Switch
+                    checked={skillCfg[activeSkill].autoExecuteAfterGreeting}
+                    onChange={(v) =>
+                      setSkillCfg((cur) => ({
+                        ...cur,
+                        [activeSkill]: { ...cur[activeSkill], autoExecuteAfterGreeting: v },
+                      }))
+                    }
+                    label="Auto-execute after greeting"
+                    helper="When enabled, Vozlia will execute this skill automatically right after the greeting (in priority order)."
+                  />
+
 
                   <TextField
                     label="Engagement Prompt (phrases)"
