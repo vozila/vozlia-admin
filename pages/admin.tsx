@@ -3,7 +3,6 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSession } from "next-auth/react";
 import { RenderLogsPanel } from "../components/RenderLogsPanel";
  
- 
 type EmailAccount = {
   id: string;
   provider_type: string;
@@ -606,9 +605,7 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                     label="Engagement Prompt (phrases)"
                     value={skillCfg[activeSkill].engagementPrompt}
                     onChange={(v) => setSkillCfg((cur) => ({ ...cur, [activeSkill]: { ...cur[activeSkill], engagementPrompt: v } }))}
-                    placeholder={"One phrase per line, e.g.
-email summaries
-summarize my inbox"}
+                    placeholder={"One phrase per line, e.g.\nemail summaries\nsummarize my inbox"}
                     helper={activeSkill === "gmail_summaries" ? "Wired: phrases that trigger routing to Gmail Summaries." : "Concept (not wired yet)"}
                     multiline
                   />
@@ -896,9 +893,7 @@ summarize my inbox"}
         label="Engagement Prompt (phrases)"
         value={memoryEngagementPrompt}
         onChange={setMemoryEngagementPrompt}
-        placeholder={"One phrase per line, e.g.
-remember this
-store that in memory"}
+        placeholder={"One phrase per line, e.g.\nremember this\nstore that in memory"}
         helper="Wired: phrases that will trigger the FSM/router to consult memory."
         multiline
       />
