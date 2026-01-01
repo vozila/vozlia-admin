@@ -534,7 +534,7 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
       })(),
 
       // NEW: Greeting priority order (skill IDs)
-      skills_priority_order: greetingPriority.map((k) => SKILL_ID_BY_KEY[k]),,
+      skills_priority_order: greetingPriority.map((k) => SKILL_ID_BY_KEY[k]),
 
       // NEW: Memory wiring
       shortterm_memory_enabled: !!settings.shortterm_memory_enabled,
