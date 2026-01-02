@@ -1,9 +1,10 @@
-
 import type { GetServerSidePropsContext } from "next";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useSession } from "next-auth/react";
+import { useEffect, useMemo, useState } from "react";
+import { useSession, signOut } from "next-auth/react";
+import { getServerSession } from "next-auth/next";
+import { authOptions } from "./api/auth/[...nextauth]";
 import { RenderLogsPanel } from "../components/RenderLogsPanel";
- 
+
 type EmailAccount = {
   id: string;
   provider_type: string;
@@ -14,7 +15,13 @@ type EmailAccount = {
   is_active: boolean;
 };
 
-type SkillKey = "gmail_summaries" | "sms" | "calendar" | "web_search" | "weather" | "investment_reporting";
+type SkillKey =
+  | "gmail_summaries"
+  | "sms"
+  | "calendar"
+  | "web_search"
+  | "weather"
+  | "investment_reporting";
 
 const SKILL_ID_BY_KEY: Record<SkillKey, string> = {
   gmail_summaries: "gmail_summary",
@@ -25,86 +32,32 @@ const SKILL_ID_BY_KEY: Record<SkillKey, string> = {
   investment_reporting: "investment_reporting",
 };
 
-const KEY_BY_SKILL_ID: Record<string, SkillKey> = Object.fromEntries(
-  Object.entries(SKILL_ID_BY_KEY).map(([k, sid]) => [sid, k as SkillKey])
-) as Record<string, SkillKey>;
-
-
-type TemplateItem =
-  | { kind: "skill"; key: SkillKey }
-  | { kind: "playbook"; id: string };
-
-type Playbook = {
-  id: string;
-  name: string;
+type SkillCfgState = {
   enabled: boolean;
-  steps: SkillKey[];
+  addToGreeting: boolean;
+  autoExecuteAfterGreeting: boolean;
+  engagementPrompt: string; // one phrase per line
+  llmPrompt: string;
+  tickers?: string; // comma-separated (investment_reporting only)
 };
 
-type Template = {
-  id: string;
-  name: string;
-  enabled: boolean;
-  sequence: TemplateItem[];
+type SettingsResponse = {
+  agent_greeting?: string;
+  realtime_prompt_addendum?: string;
+
+  gmail_summary_enabled?: boolean;
+  gmail_account_id?: string | null;
+  gmail_enabled_account_ids?: string[];
+
+  skills_config?: Record<string, any>;
+  skills_priority_order?: string[];
+
+  shortterm_memory_enabled?: boolean;
+  longterm_memory_enabled?: boolean;
+  memory_engagement_phrases?: string[];
+
+  [k: string]: any;
 };
-
-type DragPayload =
-  | { type: "skill"; key: SkillKey }
-  | { type: "playbook"; id: string };
-
-function safeParseDragPayload(raw: string): DragPayload | null {
-  try {
-    const obj = JSON.parse(raw) as Record<string, unknown>;
-    const type = obj["type"];
-    if (type === "skill") {
-      const key = obj["key"];
-      if (typeof key === "string") {
-        // Narrow to SkillKey
-        const allowed: SkillKey[] = ["gmail_summaries", "sms", "calendar", "web_search", "weather", "investment_reporting"];
-        if (allowed.includes(key as SkillKey)) return { type: "skill", key: key as SkillKey };
-      }
-      return null;
-    }
-    if (type === "playbook") {
-      const id = obj["id"];
-      if (typeof id === "string" && id.length > 0) return { type: "playbook", id };
-      return null;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function SectionRow({
-  title,
-  subtitle,
-  open,
-  onToggle,
-  children,
-  rightSlot,
-}: {
-  title: string;
-  subtitle: string;
-  open: boolean;
-  onToggle: () => void;
-  children: ReactNode;
-  rightSlot?: ReactNode;
-}) {
-  return (
-    <div className="sectionShell">
-      <button type="button" className="sectionHeader" onClick={onToggle}>
-        <span className="plus">{open ? "–" : "+"}</span>
-        <div className="sectionText">
-          <div className="sectionTitle">{title}</div>
-          <div className="sectionSub">{subtitle}</div>
-        </div>
-        {rightSlot ? <div className="sectionRight">{rightSlot}</div> : null}
-      </button>
-      {open ? <div className="sectionBody">{children}</div> : null}
-    </div>
-  );
-}
 
 function Switch({
   checked,
@@ -118,15 +71,13 @@ function Switch({
   helper?: string;
 }) {
   return (
-    <div className="switchRow">
-      <div className="switchText">
+    <label className="switchRow">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <div>
         <div className="switchLabel">{label}</div>
         {helper ? <div className="switchHelper">{helper}</div> : null}
       </div>
-      <button type="button" className={`switch ${checked ? "on" : "off"}`} onClick={() => onChange(!checked)} aria-pressed={checked}>
-        <span className="knob" />
-      </button>
-    </div>
+    </label>
   );
 }
 
@@ -150,283 +101,223 @@ function TextField({
       <div className="fieldLabel">{label}</div>
       {helper ? <div className="fieldHelper">{helper}</div> : null}
       {multiline ? (
-        <textarea className="input" rows={4} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
+        <textarea
+          className="input"
+          rows={4}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+        />
       ) : (
-        <input className="input" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
+        <input
+          className="input"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+        />
       )}
     </div>
   );
 }
 
-function SkillTile({
-  title,
-  desc,
-  enabled,
-  active,
-  onClick,
-  draggableKey,
-}: {
-  title: string;
-  desc: string;
-  enabled: boolean;
-  active: boolean;
-  onClick: () => void;
-  draggableKey: SkillKey;
-}) {
-  return (
-    <button
-      type="button"
-      className={`tile ${active ? "active" : ""}`}
-      onClick={onClick}
-      draggable
-      onDragStart={(e) => {
-        const payload: DragPayload = { type: "skill", key: draggableKey };
-        e.dataTransfer.setData("application/json", JSON.stringify(payload));
-        e.dataTransfer.effectAllowed = "copyMove";
-      }}
-    >
-      <div className="tileTop">
-        <div className="tileTitle">{title}</div>
-        <span className={`pill ${enabled ? "pillOn" : "pillOff"}`}>{enabled ? "Enabled" : "Disabled"}</span>
-      </div>
-      <div className="tileDesc">{desc}</div>
-    </button>
-  );
+function parseLines(v: string): string[] {
+  return (v || "")
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
-function DropZone({
-  title,
-  subtitle,
-  onDropPayload,
-  children,
-}: {
-  title: string;
-  subtitle: string;
-  onDropPayload: (p: DragPayload) => void;
-  children: ReactNode;
-}) {
-  const [over, setOver] = useState(false);
-  return (
-    <div
-      className={`dropZone ${over ? "over" : ""}`}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setOver(true);
-      }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setOver(false);
-        const raw = e.dataTransfer.getData("application/json");
-        const payload = safeParseDragPayload(raw);
-        if (payload) onDropPayload(payload);
-      }}
-    >
-      <div className="dropHead">
-        <div>
-          <div className="dropTitle">{title}</div>
-          <div className="dropSub">{subtitle}</div>
-        </div>
-      </div>
-      <div className="dropBody">{children}</div>
-    </div>
-  );
+function parseTickers(v: string): string[] {
+  return (v || "")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+function skillCardTitle(key: SkillKey): string {
+  switch (key) {
+    case "gmail_summaries":
+      return "Gmail Summaries";
+    case "investment_reporting":
+      return "Investment Reporting";
+    case "sms":
+      return "SMS";
+    case "calendar":
+      return "Calendar";
+    case "web_search":
+      return "Web Search";
+    case "weather":
+      return "Weather";
+    default:
+      return key;
+  }
 }
 
 export default function AdminPage() {
   const { data: session } = useSession();
-  const primaryEmail = (session?.user?.email as string | undefined) || "";
-
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  const [settings, setSettings] = useState<any>({});
+  const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [accounts, setAccounts] = useState<EmailAccount[]>([]);
-  const [accountsLoading, setAccountsLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [okMsg, setOkMsg] = useState<string | null>(null);
 
-  // Concept-only state
-  const [open, setOpen] = useState<Record<string, boolean>>({
-    skills: false,
-    playbooks: false,
-    templates: false,
-    agentMemory: false,
-    chitchat: false,
-    logging: false,
-    email: false,
-    renderLogs: false,
-  });
+  const [agentGreeting, setAgentGreeting] = useState("");
+  const [realtimeAddendum, setRealtimeAddendum] = useState("");
 
-  const [activeSkill, setActiveSkill] = useState<SkillKey | null>(null);
+  const [memoryShort, setMemoryShort] = useState(false);
+  const [memoryLong, setMemoryLong] = useState(false);
+  const [memoryEngagementPrompt, setMemoryEngagementPrompt] = useState("");
 
-  // Skill config (concept fields)
-  type SkillCfgState = {
-    enabled: boolean;
-    addToGreeting: boolean;
-    autoExecuteAfterGreeting: boolean;
-    engagementPrompt: string;
-    llmPrompt: string;
-  };
-
-  const [skillCfg, setSkillCfg] = useState<Record<SkillKey, SkillCfgState>>({
-    gmail_summaries: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
-    sms: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
-    calendar: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
-    web_search: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
-    weather: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
-    investment_reporting: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
-  });
-
-  // Greeting priority list (admin configurable)
   const [greetingPriority, setGreetingPriority] = useState<SkillKey[]>([
     "gmail_summaries",
+    "investment_reporting",
     "sms",
     "calendar",
     "web_search",
     "weather",
-    "investment_reporting",
   ]);
 
-  // Playbooks/Templates concept models
-  const [playbooks, setPlaybooks] = useState<Playbook[]>([
-    { id: "pb-1", name: "New Lead Intake", enabled: true, steps: ["gmail_summaries"] },
-    { id: "pb-2", name: "After-hours Info", enabled: true, steps: ["weather"] },
-  ]);
-  const [selectedPlaybookId, setSelectedPlaybookId] = useState<string>("pb-1");
-
-  const [templates, setTemplates] = useState<Template[]>([
-    { id: "tpl-1", name: "Default Agent Program", enabled: true, sequence: [{ kind: "playbook", id: "pb-1" }] },
-  ]);
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("tpl-1");
-
-// Agent Memory (concept UI; wiring next)
-const [memoryEngagementPrompt, setMemoryEngagementPrompt] = useState<string>("");
-const [memorySearch, setMemorySearch] = useState<string>("");
-
-// Chit-Chat (concept)
-const [chitchatDelaySec, setChitchatDelaySec] = useState<string>("2.0");
-
-// Logging toggles (concept)
-const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
-  REALTIME_LOG_STATS: true,
-  REALTIME_LOG_DELTAS: false,
-  REALTIME_LOG_TEXT: false,
-  REALTIME_LOG_ALL_EVENTS: false,
-  OBS_ENABLED: false,
-  OBS_LOG_JSON: false,
-});
-
-  // Wired loading
-  async function loadSettings() {
-    const res = await fetch("/api/admin/settings");
-    const data = await res.json();
-
-    // Defensive defaults so older control-plane deployments don't break UI
-    const skills = (data && typeof data === "object" && data.skills_config && typeof data.skills_config === "object")
-      ? data.skills_config
-      : {};
-
-    const gmailSkill = (skills as any).gmail_summary || {};
-
-    // Greeting priority order (skill IDs from control plane)
-    const prio = Array.isArray((data as any).skills_priority_order) ? ((data as any).skills_priority_order as string[]) : [];
-    if (prio.length) {
-      const mapped: SkillKey[] = [];
-      for (const sid of prio) {
-        const k = KEY_BY_SKILL_ID[sid];
-        if (k) mapped.push(k);
-      }
-      // Append any missing skills (stable)
-      const all: SkillKey[] = ["gmail_summaries", "sms", "calendar", "web_search", "weather", "investment_reporting"];
-      const finalOrder = [...mapped, ...all.filter((k) => !mapped.includes(k))];
-      setGreetingPriority(finalOrder);
-    }
-
-    setSettings({
-      ...data,
-      shortterm_memory_enabled: !!data.shortterm_memory_enabled,
-      longterm_memory_enabled: !!data.longterm_memory_enabled,
-    });
-
-    // Wire skill fields into the Skill Config panel (multi-skill; safe defaults)
-    setSkillCfg((cur) => {
-      const next: any = { ...cur };
-      const skillsObj: any = skills || {};
-
-      for (const key of Object.keys(SKILL_ID_BY_KEY) as SkillKey[]) {
-        const sid = SKILL_ID_BY_KEY[key];
-        const cfg = skillsObj[sid] || {};
-        next[key] = {
-          ...next[key],
-          enabled: key === "gmail_summaries" ? !!(data as any).gmail_summary_enabled : !!cfg.enabled,
-          addToGreeting: !!cfg.add_to_greeting,
-          autoExecuteAfterGreeting: !!cfg.auto_execute_after_greeting,
-          engagementPrompt: Array.isArray(cfg.engagement_phrases) ? cfg.engagement_phrases.join("\n") : "",
-          llmPrompt: typeof cfg.llm_prompt === "string" ? cfg.llm_prompt : "",
-        };
-      }
-      return next;
-    });
-    // Wire memory engagement phrases (one per line in UI)
-    setMemoryEngagementPrompt(Array.isArray(data.memory_engagement_phrases) ? data.memory_engagement_phrases.join("\n") : "");
-  }
-
-
-  async function loadAccounts() {
-    setAccountsLoading(true);
-    const res = await fetch("/api/admin/email-accounts");
-    const data = await res.json();
-    setAccounts(Array.isArray(data) ? data : []);
-    setAccountsLoading(false);
-  }
-
-  useEffect(() => {
-    loadSettings().catch((e: unknown) => setError(String((e as any)?.message ?? e)));
-    loadAccounts().catch((e: unknown) => setError(String((e as any)?.message ?? e)));
-  }, []);
+  const [skillCfg, setSkillCfg] = useState<Record<SkillKey, SkillCfgState>>({
+    gmail_summaries: {
+      enabled: false,
+      addToGreeting: false,
+      autoExecuteAfterGreeting: false,
+      engagementPrompt: "",
+      llmPrompt: "",
+    },
+    investment_reporting: {
+      enabled: false,
+      addToGreeting: false,
+      autoExecuteAfterGreeting: false,
+      engagementPrompt: "",
+      llmPrompt: "",
+      tickers: "",
+    },
+    sms: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    calendar: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    web_search: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
+    weather: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
+  });
 
   const gmailAccounts = useMemo(() => accounts.filter((a) => a.provider_type === "gmail"), [accounts]);
   const gmailActiveAccounts = useMemo(() => gmailAccounts.filter((a) => a.is_active), [gmailAccounts]);
 
-  const selectedPlaybook = useMemo(() => playbooks.find((p) => p.id === selectedPlaybookId) ?? playbooks[0], [playbooks, selectedPlaybookId]);
-  const selectedTemplate = useMemo(() => templates.find((t) => t.id === selectedTemplateId) ?? templates[0], [templates, selectedTemplateId]);
+  const defaultGmailAccountId = settings?.gmail_account_id || null;
 
-  async function saveWiredSettings() {
+  async function loadSettings() {
+    const res = await fetch("/api/admin/settings");
+    const data = (await res.json()) as SettingsResponse;
+    if (!res.ok) throw new Error(data?.error || "Failed to load settings");
+
+    setSettings(data);
+    setAgentGreeting(String(data.agent_greeting || ""));
+    setRealtimeAddendum(String(data.realtime_prompt_addendum || ""));
+
+    setMemoryShort(!!data.shortterm_memory_enabled);
+    setMemoryLong(!!data.longterm_memory_enabled);
+    setMemoryEngagementPrompt((data.memory_engagement_phrases || []).join("\n"));
+
+    // Skills config → UI state (defensive: accept multiple shapes)
+    const skills = (data && typeof data === "object" && data.skills_config && typeof data.skills_config === "object")
+      ? (data.skills_config as Record<string, any>)
+      : {};
+
+    const nextSkillCfg: Record<SkillKey, SkillCfgState> = { ...skillCfg };
+
+    (Object.keys(SKILL_ID_BY_KEY) as SkillKey[]).forEach((key) => {
+      const sid = SKILL_ID_BY_KEY[key];
+      const cfg = skills[sid] || {};
+
+      const engagement =
+        Array.isArray(cfg.engagement_phrases) ? cfg.engagement_phrases.join("\n") :
+        typeof cfg.engagementPrompt === "string" ? cfg.engagementPrompt :
+        typeof cfg.engagement_prompt === "string" ? cfg.engagement_prompt :
+        "";
+
+      nextSkillCfg[key] = {
+        enabled: !!cfg.enabled || (sid === "gmail_summary" ? !!data.gmail_summary_enabled : false),
+        addToGreeting: !!cfg.add_to_greeting,
+        autoExecuteAfterGreeting: !!cfg.auto_execute_after_greeting,
+        engagementPrompt: engagement,
+        llmPrompt: String(cfg.llm_prompt || cfg.llmPrompt || ""),
+        tickers: key === "investment_reporting" ? String(cfg.tickers_raw || (Array.isArray(cfg.tickers) ? cfg.tickers.join(",") : (cfg.tickers || ""))) : undefined,
+      };
+    });
+
+    setSkillCfg(nextSkillCfg);
+
+    // Priority order
+    const order = Array.isArray(data.skills_priority_order) ? data.skills_priority_order : [];
+    if (order.length) {
+      const next = order
+        .map((sid) => {
+          const key = (Object.keys(SKILL_ID_BY_KEY) as SkillKey[]).find((k) => SKILL_ID_BY_KEY[k] === sid);
+          return key || null;
+        })
+        .filter(Boolean) as SkillKey[];
+      if (next.length) setGreetingPriority(next);
+    }
+  }
+
+  async function loadAccounts() {
+    const res = await fetch("/api/admin/email-accounts");
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Failed to load accounts (${res.status})`);
+    let data: any = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      // upstream might return plain text; ignore
+      data = {};
+    }
+    const list = Array.isArray(data.accounts) ? data.accounts : Array.isArray(data) ? data : [];
+    setAccounts(list);
+  }
+
+  async function patchAccount(id: string, patch: Partial<EmailAccount>) {
+    const res = await fetch(`/api/admin/email-accounts/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(text || `Failed to patch account ${id}`);
+    await loadAccounts();
+  }
+
+  async function setPrimaryAccount(id: string) {
+    const updates = gmailAccounts.map((a) => patchAccount(a.id, { is_primary: a.id === id }));
+    await Promise.all(updates);
+  }
+
+  async function saveSettings() {
+    if (!settings) return;
+
     setSaving(true);
     setError(null);
+    setOkMsg(null);
 
-    // Normalize phrase lists from textarea inputs (one phrase per line)
-    const gmailEngagementPhrases = (skillCfg.gmail_summaries.engagementPrompt || "")
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    const memoryPhrases = (memoryEngagementPrompt || "")
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    // Control-plane PATCH payload (modular skills_config + memory toggles)
     const payload = {
-      agent_greeting: settings.agent_greeting,
-      realtime_prompt_addendum: settings.realtime_prompt_addendum,
+      agent_greeting: agentGreeting,
+      realtime_prompt_addendum: realtimeAddendum,
 
-      // Existing wired Gmail toggles + inbox selection
-      gmail_summary_enabled: settings.gmail_summary_enabled,
+      gmail_summary_enabled: !!settings.gmail_summary_enabled,
       gmail_account_id: settings.gmail_account_id,
       gmail_enabled_account_ids: settings.gmail_enabled_account_ids,
 
-      // NEW: Modular per-skill config (all skills; backend may choose to use subset)
+      skills_priority_order: greetingPriority.map((k) => SKILL_ID_BY_KEY[k]),
+
+      shortterm_memory_enabled: memoryShort,
+      longterm_memory_enabled: memoryLong,
+      memory_engagement_phrases: parseLines(memoryEngagementPrompt),
+
       skills_config: (() => {
         const out: any = {};
-        const parseLines = (v: string) =>
-          (v || "")
-            .split("\n")
-            .map((s) => s.trim())
-            .filter(Boolean);
-
         (Object.keys(SKILL_ID_BY_KEY) as SkillKey[]).forEach((key) => {
           const sid = SKILL_ID_BY_KEY[key];
-          const cfg = (skillCfg as any)[key] || {};
+          const cfg = skillCfg[key];
+
           out[sid] = {
             enabled: !!cfg.enabled,
             add_to_greeting: !!cfg.addToGreeting,
@@ -434,23 +325,17 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
             engagement_phrases: parseLines(cfg.engagementPrompt || ""),
             llm_prompt: cfg.llmPrompt || "",
           };
+
+          if (sid === "investment_reporting") {
+            out[sid].tickers = parseTickers(cfg.tickers || "");
+            out[sid].tickers_raw = cfg.tickers || "";
+          }
         });
 
-        // Mirror legacy gmail_summary_enabled into the skill as well
-        out.gmail_summary = {
-          ...(out.gmail_summary || {}),
-          enabled: !!settings.gmail_summary_enabled,
-        };
-
+        // Mirror legacy gmail_summary_enabled into skill config too (defensive)
+        out.gmail_summary = { ...(out.gmail_summary || {}), enabled: !!settings.gmail_summary_enabled };
         return out;
       })(),
-
-      // NEW: Greeting priority order (skill IDs)
-      skills_priority_order: greetingPriority.map((k) => SKILL_ID_BY_KEY[k]),
-      // NEW: Memory wiring
-      shortterm_memory_enabled: !!settings.shortterm_memory_enabled,
-      longterm_memory_enabled: !!settings.longterm_memory_enabled,
-      memory_engagement_phrases: memoryPhrases,
     };
 
     try {
@@ -459,1116 +344,320 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to save settings");
-
       setSettings(data);
-
-      // Re-sync Gmail skill fields from server (defensive: supports older responses)
-      const skills =
-        data && typeof data === "object" && data.skills_config && typeof data.skills_config === "object"
-          ? data.skills_config
-          : {};
-      const gmailSkill = (skills as any).gmail_summary || {};
-
-      setSkillCfg((cur) => ({
-        ...cur,
-        gmail_summaries: {
-          ...cur.gmail_summaries,
-          enabled: !!data.gmail_summary_enabled,
-          addToGreeting: !!gmailSkill.add_to_greeting,
-          autoExecuteAfterGreeting: !!gmailSkill.auto_execute_after_greeting,
-          engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("\n") : "",
-          llmPrompt: typeof gmailSkill.llm_prompt === "string" ? gmailSkill.llm_prompt : "",
-        },
-      }));
-
-      setMemoryEngagementPrompt(Array.isArray(data.memory_engagement_phrases) ? data.memory_engagement_phrases.join("\n") : "");
-    } catch (e: unknown) {
-      setError(String((e as any)?.message ?? e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-
-  async function patchAccount(id: string, patch: Partial<EmailAccount>) {
-    setError(null);
-    try {
-      const res = await fetch(`/api/admin/email-accounts/${encodeURIComponent(id)}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to update email account");
+      setOkMsg("Saved.");
+      await loadSettings();
       await loadAccounts();
     } catch (e: any) {
       setError(e?.message || String(e));
+    } finally {
+      setSaving(false);
+      setTimeout(() => setOkMsg(null), 2500);
     }
   }
 
-  async function setPrimaryAccount(id: string) {
-    const updates = accounts
-      .filter((a) => a.provider_type === "gmail")
-      .map((a) => patchAccount(a.id, { is_primary: a.id === id }));
-    await Promise.all(updates);
+  useEffect(() => {
+    (async () => {
+      try {
+        await Promise.all([loadSettings(), loadAccounts()]);
+      } catch (e: any) {
+        setError(e?.message || String(e));
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function updateSkill(key: SkillKey, patch: Partial<SkillCfgState>) {
+    setSkillCfg((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
   }
 
-  async function toggleAccountActive(id: string, nextActive: boolean) {
-    await patchAccount(id, { is_active: nextActive });
+  function movePriority(key: SkillKey, dir: -1 | 1) {
+    setGreetingPriority((prev) => {
+      const idx = prev.indexOf(key);
+      if (idx < 0) return prev;
+      const next = [...prev];
+      const j = idx + dir;
+      if (j < 0 || j >= next.length) return prev;
+      [next[idx], next[j]] = [next[j], next[idx]];
+      return next;
+    });
   }
 
-  function appendToGreetingNote(key: SkillKey): string {
-    if (skillCfg[key].autoExecuteAfterGreeting) return "Auto-exec after greeting";
-    if (skillCfg[key].addToGreeting) return "Announced in greeting";
-    return "Runs on demand";
+  async function connectGmail() {
+    window.location.href = "/api/admin/gmail/connect";
+  }
+
+  if (!session) {
+    return (
+      <div className="wrap">
+        <div className="card">
+          <h1>Vozlia Admin</h1>
+          <p>You are not signed in.</p>
+          <a className="btn" href="/api/auth/signin">Sign in</a>
+        </div>
+        <style jsx>{baseStyles}</style>
+      </div>
+    );
   }
 
   return (
-    <div className="page">
-      <div className="bg" />
-      <div className="wrap">
-        <header className="top">
-          <div>
-            <div className="brand">Vozlia</div>
-            <div className="subtitle">Admin Portal</div>
-          </div>
-          <div className="who">
-            <div className="muted">Signed in as</div>
-            <div className="mono">{primaryEmail || "admin"}</div>
-          </div>
-        </header>
+    <div className="wrap">
+      <div className="topbar">
+        <div className="brand">Vozlia Admin</div>
+        <div className="topbarRight">
+          <div className="user">{session.user?.email}</div>
+          <button className="btn secondary" onClick={() => signOut({ callbackUrl: "/api/auth/signin" })}>Sign out</button>
+        </div>
+      </div>
 
-        {error ? (
-          <div className="alert">
-            <div className="alertTitle">Error</div>
-            <div className="alertBody">{error}</div>
-          </div>
-        ) : null}
+      {loading ? (
+        <div className="card">Loading...</div>
+      ) : (
+        <>
+          {error ? <div className="alert error">{error}</div> : null}
+          {okMsg ? <div className="alert ok">{okMsg}</div> : null}
 
-        <div className="stack">
-          <SectionRow
-            title="Skills"
-            subtitle="Capabilities/tools. Click a tile to configure. Drag tiles into Playbooks/Templates."
-            open={open.skills}
-            onToggle={() => setOpen((p) => ({ ...p, skills: !p.skills }))}
-            rightSlot={<span className="pill pillOn">{skillCfg.gmail_summaries.enabled ? "Gmail enabled" : "Gmail disabled"}</span>}
-          >
-            <div className="grid2">
-              <div className="tiles">
-                <SkillTile
-                  title="Gmail Summaries"
-                  desc={appendToGreetingNote("gmail_summaries")}
-                  enabled={skillCfg.gmail_summaries.enabled}
-                  active={activeSkill === "gmail_summaries"}
-                  onClick={() => setActiveSkill((s) => (s === "gmail_summaries" ? null : "gmail_summaries"))}
-                  draggableKey="gmail_summaries"
-                />
-                <SkillTile
-                  title="SMS"
-                  desc={appendToGreetingNote("sms")}
-                  enabled={skillCfg.sms.enabled}
-                  active={activeSkill === "sms"}
-                  onClick={() => setActiveSkill((s) => (s === "sms" ? null : "sms"))}
-                  draggableKey="sms"
-                />
-                <SkillTile
-                  title="Calendar"
-                  desc={appendToGreetingNote("calendar")}
-                  enabled={skillCfg.calendar.enabled}
-                  active={activeSkill === "calendar"}
-                  onClick={() => setActiveSkill((s) => (s === "calendar" ? null : "calendar"))}
-                  draggableKey="calendar"
-                />
-                <SkillTile
-                  title="Web Search"
-                  desc={appendToGreetingNote("web_search")}
-                  enabled={skillCfg.web_search.enabled}
-                  active={activeSkill === "web_search"}
-                  onClick={() => setActiveSkill((s) => (s === "web_search" ? null : "web_search"))}
-                  draggableKey="web_search"
-                />
-                <SkillTile
-                  title="Weather"
-                  desc={appendToGreetingNote("weather")}
-                  enabled={skillCfg.weather.enabled}
-                  active={activeSkill === "weather"}
-                  onClick={() => setActiveSkill((s) => (s === "weather" ? null : "weather"))}
-                  draggableKey="weather"
-                />
-                <SkillTile
-                  title="Investment Reporting"
-                  desc={appendToGreetingNote("investment_reporting")}
-                  enabled={skillCfg.investment_reporting.enabled}
-                  active={activeSkill === "investment_reporting"}
-                  onClick={() => setActiveSkill((s) => (s === "investment_reporting" ? null : "investment_reporting"))}
-                  draggableKey="investment_reporting"
-                />
-              </div>
-
-              <div className="panel">
-                <div className="panelTitle">Greeting Skill Priority</div>
-                <div className="panelSub">Drag skills to reorder. When multiple skills have “Add to greeting” enabled, the topmost runs first.</div>
-
-                <DropZone
-                  title="Priority List"
-                  subtitle="Drop a skill tile here to move it to the top."
-                  onDropPayload={(p) => {
-                    if (p.type !== "skill") return;
-                    setGreetingPriority((cur) => [p.key, ...cur.filter((k) => k !== p.key)]);
-                  }}
-                >
-                  <div className="list">
-                    {greetingPriority.map((k) => (
-                      <div key={k} className="listItem">
-                        <span className="mono">{k}</span>
-                        <span className={`pill ${skillCfg[k].addToGreeting ? "pillOn" : "pillOff"}`}>{skillCfg[k].addToGreeting ? "Add to greeting" : "Off"}</span>
-                      </div>
-                    ))}
-                  </div>
-                </DropZone>
-              </div>
+          <div className="grid">
+            <div className="card">
+              <h2>Call Greeting</h2>
+              <TextField
+                label="Agent Greeting"
+                value={agentGreeting}
+                onChange={setAgentGreeting}
+                helper="This is what Vozlia says at the start of the call."
+                multiline
+              />
+              <TextField
+                label="Realtime Prompt Addendum"
+                value={realtimeAddendum}
+                onChange={setRealtimeAddendum}
+                helper="Extra system prompt appended to Realtime session.update."
+                multiline
+              />
             </div>
 
-            {activeSkill ? (
-              <div className="panel" style={{ marginTop: 14 }}>
-                <div className="panelTitle">Configure: {activeSkill}</div>
-                <div className="panelSub">Concept controls (we’ll wire these to the control plane next).</div>
+            <div className="card">
+              <h2>Memory</h2>
+              <Switch
+                checked={memoryShort}
+                onChange={setMemoryShort}
+                label="Short-term memory enabled"
+                helper="Stores short-lived call context for follow-up within a call."
+              />
+              <Switch
+                checked={memoryLong}
+                onChange={setMemoryLong}
+                label="Long-term memory enabled"
+                helper="Stores call summaries/transcripts for later retrieval."
+              />
+              <TextField
+                label="Memory engagement phrases"
+                value={memoryEngagementPrompt}
+                onChange={setMemoryEngagementPrompt}
+                helper="One phrase per line. Triggers memory recall behaviors."
+                multiline
+              />
+            </div>
 
-                <div className="form">
-                  {/* Gmail enable is wired to current settings; others are concept */}
-                  {activeSkill === "gmail_summaries" ? (
-                    <Switch
-                      checked={!!settings.gmail_summary_enabled}
-                      onChange={(v) => {
-                        setSettings((p: any) => ({ ...p, gmail_summary_enabled: v }));
-                        setSkillCfg((cur) => ({ ...cur, gmail_summaries: { ...cur.gmail_summaries, enabled: v } }));
-                      }}
-                      label="Enable / Disable"
-                      helper="Wired to gmail_summary_enabled"
-                    />
-                  ) : (
-                    <Switch
-                      checked={skillCfg[activeSkill].enabled}
-                      onChange={(v) => setSkillCfg((cur) => ({ ...cur, [activeSkill]: { ...cur[activeSkill], enabled: v } }))}
-                      label="Enable / Disable"
-                      helper="Concept (not wired yet)"
-                    />
-                  )}
+            <div className="card">
+              <h2>Gmail Accounts</h2>
+              <div className="row">
+                <button className="btn" onClick={connectGmail}>Connect Gmail</button>
+              </div>
 
+              {gmailAccounts.length === 0 ? (
+                <div className="muted">No Gmail accounts connected.</div>
+              ) : (
+                <div className="table">
+                  <div className="thead">
+                    <div>Email</div>
+                    <div>Primary</div>
+                    <div>Active</div>
+                  </div>
+                  {gmailAccounts.map((a) => (
+                    <div key={a.id} className="trow">
+                      <div className="mono">{a.email_address || a.display_name || a.id}</div>
+                      <div>
+                        <input
+                          type="radio"
+                          name="primaryGmail"
+                          checked={a.is_primary}
+                          onChange={() => setPrimaryAccount(a.id)}
+                        />
+                      </div>
+                      <div>
+                        <input
+                          type="checkbox"
+                          checked={a.is_active}
+                          onChange={(e) => patchAccount(a.id, { is_active: e.target.checked })}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="field" style={{ marginTop: 14 }}>
+                <div className="fieldLabel">Default Gmail inbox for summaries</div>
+                <div className="fieldHelper">Used by Gmail Summaries skill when enabled.</div>
+                <select
+                  className="input"
+                  value={defaultGmailAccountId || ""}
+                  onChange={(e) => {
+                    const nextId = e.target.value || null;
+                    setSettings((prev) => (prev ? { ...prev, gmail_account_id: nextId } : prev));
+                  }}
+                >
+                  <option value="">(none)</option>
+                  {gmailActiveAccounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {(a.email_address || a.display_name || a.id) + (a.is_primary ? " (primary)" : "")}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <Switch
+                checked={!!settings?.gmail_summary_enabled}
+                onChange={(v) => setSettings((prev) => (prev ? { ...prev, gmail_summary_enabled: v } : prev))}
+                label="Enable Gmail Summaries (legacy toggle)"
+                helper="Kept for backward compatibility; also mirrored into skills_config.gmail_summary.enabled."
+              />
+            </div>
+
+            <div className="card">
+              <h2>Greeting Priority</h2>
+              <div className="muted">Order in which “add to greeting” skills are offered.</div>
+              <div className="prio">
+                {greetingPriority.map((k) => (
+                  <div key={k} className="prioRow">
+                    <div className="prioName">{skillCardTitle(k)}</div>
+                    <div className="prioBtns">
+                      <button className="btn tiny secondary" onClick={() => movePriority(k, -1)}>&uarr;</button>
+                      <button className="btn tiny secondary" onClick={() => movePriority(k, 1)}>&darr;</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="section">
+            <h2>Skills</h2>
+            <div className="grid">
+              {(["gmail_summaries", "investment_reporting", "sms", "calendar", "web_search", "weather"] as SkillKey[]).map((k) => (
+                <div key={k} className="card">
+                  <h3>{skillCardTitle(k)}</h3>
+
+                  <Switch checked={skillCfg[k].enabled} onChange={(v) => updateSkill(k, { enabled: v })} label="Enable" />
                   <Switch
-                    checked={skillCfg[activeSkill].addToGreeting}
-                    onChange={(v) =>
-                      setSkillCfg((cur) => ({
-                        ...cur,
-                        [activeSkill]: { ...cur[activeSkill], addToGreeting: v },
-                      }))
-                    }
+                    checked={skillCfg[k].addToGreeting}
+                    onChange={(v) => updateSkill(k, { addToGreeting: v })}
                     label="Add to greeting"
-                    helper="When enabled, the agent announces this skill in the greeting (discovery only)."
+                    helper="Offer this skill as an option after greeting."
                   />
-
                   <Switch
-                    checked={skillCfg[activeSkill].autoExecuteAfterGreeting}
-                    onChange={(v) =>
-                      setSkillCfg((cur) => ({
-                        ...cur,
-                        [activeSkill]: { ...cur[activeSkill], autoExecuteAfterGreeting: v },
-                      }))
-                    }
+                    checked={skillCfg[k].autoExecuteAfterGreeting}
+                    onChange={(v) => updateSkill(k, { autoExecuteAfterGreeting: v })}
                     label="Auto-execute after greeting"
-                    helper="When enabled, Vozlia will execute this skill automatically right after the greeting (in priority order)."
+                    helper="Run this skill automatically after greeting if conditions match."
                   />
-
 
                   <TextField
-                    label="Engagement Prompt (phrases)"
-                    value={skillCfg[activeSkill].engagementPrompt}
-                    onChange={(v) => setSkillCfg((cur) => ({ ...cur, [activeSkill]: { ...cur[activeSkill], engagementPrompt: v } }))}
-                    placeholder={"One phrase per line, e.g.\nemail summaries\nsummarize my inbox"}
-                    helper={activeSkill === "gmail_summaries" ? "Wired: phrases that trigger routing to Gmail Summaries." : "Concept (not wired yet)"}
+                    label="Engagement Prompt"
+                    value={skillCfg[k].engagementPrompt}
+                    onChange={(v) => updateSkill(k, { engagementPrompt: v })}
+                    helper="One phrase per line. Caller can say these to trigger the skill."
                     multiline
                   />
 
                   <TextField
                     label="LLM Prompt"
-                    value={skillCfg[activeSkill].llmPrompt}
-                    onChange={(v) => setSkillCfg((cur) => ({ ...cur, [activeSkill]: { ...cur[activeSkill], llmPrompt: v } }))}
-                    placeholder="Full prompt text used when this skill runs."
-                    helper="Concept"
+                    value={skillCfg[k].llmPrompt}
+                    onChange={(v) => updateSkill(k, { llmPrompt: v })}
+                    helper="Optional custom instruction appended for this skill."
                     multiline
                   />
 
-                  {activeSkill === "gmail_summaries" ? (
-                    <div className="panelInset">
-                      <div className="panelTitle">Gmail Inbox Selection</div>
-                      <div className="panelSub">These determine which inbox Gmail Summaries uses.</div>
-
-                      <div className="form">
-                        <div className="field">
-                          <div className="fieldLabel">Default Inbox</div>
-                          <div className="fieldHelper">Maps to gmail_account_id (wired)</div>
-                          <select
-                            className="input"
-                            value={settings.gmail_account_id || ""}
-                            onChange={(e) => setSettings((p: any) => ({ ...p, gmail_account_id: e.target.value }))}
-                          >
-                            <option value="">(not set)</option>
-                            {gmailActiveAccounts.map((a) => (
-                              <option key={a.id} value={a.id}>
-                                {(a.email_address || a.display_name || a.id) + (a.is_primary ? " (primary)" : "")}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
-                        <div className="field">
-                          <div className="fieldLabel">Enabled Inboxes</div>
-                          <div className="fieldHelper">Maps to gmail_enabled_account_ids (wired)</div>
-                          <div className="checkGrid">
-                            {gmailActiveAccounts.map((a) => {
-                              const enabled: string[] = Array.isArray(settings.gmail_enabled_account_ids) ? settings.gmail_enabled_account_ids : [];
-                              const checked = enabled.includes(a.id);
-                              return (
-                                <label key={a.id} className="checkRow">
-                                  <input
-                                    type="checkbox"
-                                    checked={checked}
-                                    onChange={() => {
-                                      const next = checked ? enabled.filter((x) => x !== a.id) : [...enabled, a.id];
-                                      setSettings((p: any) => ({ ...p, gmail_enabled_account_ids: next }));
-                                    }}
-                                  />
-                                  <span className="checkText">{a.email_address || a.display_name || a.id}</span>
-                                </label>
-                              );
-                            })}
-                          </div>
-                        </div>
-
-                        <div className="actions">
-                          <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
-                            {saving ? "Saving…" : "Save Gmail Settings"}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
+                  {k === "investment_reporting" ? (
+                    <TextField
+                      label="Tickers"
+                      value={skillCfg[k].tickers || ""}
+                      onChange={(v) => updateSkill(k, { tickers: v })}
+                      helper="Comma-separated tickers (e.g., AAPL, MSFT, TSLA)."
+                      placeholder="AAPL, MSFT, TSLA"
+                    />
                   ) : null}
                 </div>
-              </div>
-            ) : null}
-          </SectionRow>
-
-          <SectionRow
-            title="Playbooks"
-            subtitle="Reusable workflows. Build by dragging enabled skill tiles into a playbook container."
-            open={open.playbooks}
-            onToggle={() => setOpen((p) => ({ ...p, playbooks: !p.playbooks }))}
-          >
-            <div className="grid2">
-              <div className="panel">
-                <div className="panelTitle">Playbooks</div>
-                <div className="panelSub">Concept UI (not wired yet).</div>
-
-                <div className="list">
-                  {playbooks.map((pb) => (
-                    <button
-                      key={pb.id}
-                      type="button"
-                      className={`listSelect ${pb.id === selectedPlaybookId ? "active" : ""}`}
-                      onClick={() => setSelectedPlaybookId(pb.id)}
-                      draggable
-                      onDragStart={(e) => {
-                        const payload: DragPayload = { type: "playbook", id: pb.id };
-                        e.dataTransfer.setData("application/json", JSON.stringify(payload));
-                        e.dataTransfer.effectAllowed = "copyMove";
-                      }}
-                    >
-                      <div className="row">
-                        <div className="rowMain">
-                          <div className="rowTitle">{pb.name}</div>
-                          <div className="rowSub mono">{pb.id}</div>
-                        </div>
-                        <span className={`pill ${pb.enabled ? "pillOn" : "pillOff"}`}>{pb.enabled ? "Enabled" : "Disabled"}</span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="panel">
-                <div className="panelTitle">Build: {selectedPlaybook?.name ?? "Playbook"}</div>
-                <div className="panelSub">Drop skills into the container. Order = execution order.</div>
-
-                <Switch
-                  checked={!!selectedPlaybook?.enabled}
-                  onChange={(v) => {
-                    setPlaybooks((cur) => cur.map((p) => (p.id === selectedPlaybookId ? { ...p, enabled: v } : p)));
-                  }}
-                  label="Enable Playbook"
-                />
-
-                <DropZone
-                  title="Playbook Steps"
-                  subtitle="Drop a skill tile here to append it."
-                  onDropPayload={(p) => {
-                    if (p.type !== "skill") return;
-                    setPlaybooks((cur) =>
-                      cur.map((pb) => {
-                        if (pb.id !== selectedPlaybookId) return pb;
-                        const exists = pb.steps.includes(p.key);
-                        return exists ? pb : { ...pb, steps: [...pb.steps, p.key] };
-                      })
-                    );
-                  }}
-                >
-                  <div className="chips">
-                    {(selectedPlaybook?.steps ?? []).map((k, idx) => (
-                      <div key={`${k}-${idx}`} className="chip">
-                        <span className="mono">{k}</span>
-                        <button
-                          type="button"
-                          className="chipX"
-                          onClick={() => {
-                            setPlaybooks((cur) =>
-                              cur.map((pb) => {
-                                if (pb.id !== selectedPlaybookId) return pb;
-                                return { ...pb, steps: pb.steps.filter((x, i) => !(i === idx && x === k)) };
-                              })
-                            );
-                          }}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    ))}
-                    {(selectedPlaybook?.steps ?? []).length === 0 ? <div className="muted">No steps yet. Drag a skill tile in.</div> : null}
-                  </div>
-                </DropZone>
-              </div>
+              ))}
             </div>
-          </SectionRow>
-
-          <SectionRow
-            title="Templates"
-            subtitle="Tenant agent programs. Build by dragging playbooks and/or skills into a template container."
-            open={open.templates}
-            onToggle={() => setOpen((p) => ({ ...p, templates: !p.templates }))}
-          >
-            <div className="grid2">
-              <div className="panel">
-                <div className="panelTitle">Templates</div>
-                <div className="panelSub">Concept UI (not wired yet).</div>
-
-                <div className="list">
-                  {templates.map((tpl) => (
-                    <button
-                      key={tpl.id}
-                      type="button"
-                      className={`listSelect ${tpl.id === selectedTemplateId ? "active" : ""}`}
-                      onClick={() => setSelectedTemplateId(tpl.id)}
-                    >
-                      <div className="row">
-                        <div className="rowMain">
-                          <div className="rowTitle">{tpl.name}</div>
-                          <div className="rowSub mono">{tpl.id}</div>
-                        </div>
-                        <span className={`pill ${tpl.enabled ? "pillOn" : "pillOff"}`}>{tpl.enabled ? "Enabled" : "Disabled"}</span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="panel">
-                <div className="panelTitle">Build: {selectedTemplate?.name ?? "Template"}</div>
-                <div className="panelSub">Drop playbooks (from list) or skills (from Skills tiles) into the container. Order = execution order.</div>
-
-                <Switch
-                  checked={!!selectedTemplate?.enabled}
-                  onChange={(v) => setTemplates((cur) => cur.map((t) => (t.id === selectedTemplateId ? { ...t, enabled: v } : t)))}
-                  label="Enable Template"
-                />
-
-                <DropZone
-                  title="Template Sequence"
-                  subtitle="Drop a playbook or skill to append it."
-                  onDropPayload={(p) => {
-                    const item: TemplateItem | null =
-                      p.type === "playbook" ? { kind: "playbook", id: p.id } : { kind: "skill", key: p.key };
-
-                    if (!item) return;
-
-                    setTemplates((cur) =>
-                      cur.map((t) => {
-                        if (t.id !== selectedTemplateId) return t;
-
-                        const exists =
-                          item.kind === "playbook"
-                            ? t.sequence.some((x) => x.kind === "playbook" && x.id === item.id)
-                            : t.sequence.some((x) => x.kind === "skill" && x.key === item.key);
-
-                        return exists ? t : { ...t, sequence: [...t.sequence, item] };
-                      })
-                    );
-                  }}
-                >
-                  <div className="chips">
-                    {(selectedTemplate?.sequence ?? []).map((it, idx) => (
-                      <div key={`${it.kind}-${"id" in it ? it.id : it.key}-${idx}`} className="chip">
-                        <span className="mono">
-                          {it.kind}:{it.kind === "playbook" ? it.id : it.key}
-                        </span>
-                        <button
-                          type="button"
-                          className="chipX"
-                          onClick={() => {
-                            setTemplates((cur) =>
-                              cur.map((t) => {
-                                if (t.id !== selectedTemplateId) return t;
-                                return { ...t, sequence: t.sequence.filter((_, i) => i !== idx) };
-                              })
-                            );
-                          }}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    ))}
-                    {(selectedTemplate?.sequence ?? []).length === 0 ? <div className="muted">No items yet. Drag a playbook or skill in.</div> : null}
-                  </div>
-                </DropZone>
-              </div>
-            </div>
-          </SectionRow>
-
-          <SectionRow
-  title="Agent Memory"
-  subtitle="Short-term + long-term toggles and engagement phrases (wired). Memory Bank table still concept."
-  open={open.agentMemory}
-  onToggle={() => setOpen((p) => ({ ...p, agentMemory: !p.agentMemory }))}
->
-  <div className="panel">
-    <div className="panelTitle">Memory</div>
-    <div className="panelSub">
-      These controls are wired to the control plane. Save to apply them at runtime.
-    </div>
-
-    <div className="form" style={{ marginTop: 12 }}>
-      <Switch
-        checked={!!settings.shortterm_memory_enabled}
-        onChange={(v) => setSettings((p: any) => ({ ...p, shortterm_memory_enabled: v }))}
-        label="Enable Short-Term Memory"
-        helper="Wired: stored in control-plane settings."
-      />
-
-      <Switch
-        checked={!!settings.longterm_memory_enabled}
-        onChange={(v) => setSettings((p: any) => ({ ...p, longterm_memory_enabled: v }))}
-        label="Enable Long-Term Memory"
-        helper="Wired: stored in control-plane settings."
-      />
-
-      <TextField
-        label="Engagement Prompt (phrases)"
-        value={memoryEngagementPrompt}
-        onChange={setMemoryEngagementPrompt}
-        placeholder={"One phrase per line, e.g.\nremember this\nstore that in memory"}
-        helper="Wired: phrases that will trigger the FSM/router to consult memory."
-        multiline
-      />
-    </div>
-
-    <div className="actions" style={{ marginTop: 12 }}>
-      <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
-        {saving ? "Saving…" : "Save Memory Settings"}
-      </button>
-    </div>
-  </div>
-
-  <div className="panel" style={{ marginTop: 14 }}>
-
-    <div className="panelTitle">Memory Bank</div>
-    <div className="panelSub">Search and browse long-term memory entries. (Concept display; API wiring next.)</div>
-
-    <div style={{ marginTop: 12 }}>
-      <TextField
-        label="Search"
-        value={memorySearch}
-        onChange={setMemorySearch}
-        placeholder="Search memories…"
-      />
-    </div>
-
-    <div style={{ marginTop: 12, overflowX: "auto" }}>
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Created</th>
-            <th>Type</th>
-            <th>Key</th>
-            <th>Value</th>
-            <th>Source</th>
-          </tr>
-        </thead>
-        <tbody>
-          {(() => {
-            const rows: any[] = Array.isArray(settings.memory_bank_preview) ? settings.memory_bank_preview : [];
-            const q = memorySearch.trim().toLowerCase();
-            const filtered = q
-              ? rows.filter((r) => JSON.stringify(r).toLowerCase().includes(q))
-              : rows;
-            if (filtered.length === 0) {
-              return (
-                <tr>
-                  <td colSpan={5} className="muted" style={{ padding: 12 }}>
-                    No entries to display. (This table will populate once the Memory Bank API is wired.)
-                  </td>
-                </tr>
-              );
-            }
-            return filtered.slice(0, 200).map((r, i) => (
-              <tr key={i}>
-                <td>{r.created_at || "—"}</td>
-                <td>{r.type || "—"}</td>
-                <td className="mono">{r.key || "—"}</td>
-                <td>{r.value || "—"}</td>
-                <td className="mono">{r.source || "—"}</td>
-              </tr>
-            ));
-          })()}
-        </tbody>
-      </table>
-    </div>
-  </div>
-</SectionRow>
-
-<SectionRow
-  title="Chit-Chat"
-  subtitle="Controls for chitchat behavior (dead air response delay)."
-  open={open.chitchat}
-  onToggle={() => setOpen((p) => ({ ...p, chitchat: !p.chitchat }))}
->
-  <div className="panel">
-    <div className="panelTitle">Chit-Chat</div>
-    <div className="panelSub">Concept UI — we will wire these settings to the control plane next.</div>
-
-    <div className="form" style={{ marginTop: 12 }}>
-      <TextField
-        label="Response Delay Time"
-        value={chitchatDelaySec}
-        onChange={setChitchatDelaySec}
-        placeholder="2.0"
-        helper="Time of dead air (seconds) before Vozlia responds in chitchat mode. (Concept)"
-      />
-    </div>
-  </div>
-</SectionRow>
-
-<SectionRow
-  title="Logging"
-  subtitle="Toggle logging verbosity. Keep hot-path logging minimal in production."
-  open={open.logging}
-  onToggle={() => setOpen((p) => ({ ...p, logging: !p.logging }))}
->
-  <div className="panel">
-    <div className="panelTitle">Logging</div>
-    <div className="panelSub">
-      Concept UI. We’ll wire these toggles to env/config and propagate to the backend. Prefer realtime stats only (avoid per-frame deltas).
-    </div>
-
-    <div className="form" style={{ marginTop: 12 }}>
-      {Object.keys(logToggles).map((k) => (
-        <Switch
-          key={k}
-          checked={!!logToggles[k]}
-          onChange={(v) => setLogToggles((cur) => ({ ...cur, [k]: v }))}
-          label={k}
-          helper={k === "REALTIME_LOG_DELTAS" ? "Avoid in production; can impact hot path." : undefined}
-        />
-      ))}
-    </div>
-  </div>
-</SectionRow>
-
-<SectionRow
-  title="Email Accounts"
-  subtitle="Connected Gmail accounts + controls for which inbox Gmail Summaries uses."
-  open={open.email}
-  onToggle={() => setOpen((p) => ({ ...p, email: !p.email }))}
->
-  <div className="panel">
-    <div className="panelTitle">Gmail Summaries Inbox Selection (wired)</div>
-    <div className="panelSub">
-      These two settings determine which email Gmail Summaries uses. This section duplicates the controls in the Gmail skill tile so it’s easy to find.
-    </div>
-
-    <div className="form" style={{ marginTop: 12 }}>
-      <div className="field">
-        <div className="fieldLabel">Default Inbox</div>
-        <div className="fieldHelper">
-          Maps to <span className="mono">gmail_account_id</span>. Used as the default inbox for summaries.
-        </div>
-        <select
-          className="input"
-          value={settings.gmail_account_id || ""}
-          onChange={(e) => setSettings((p: any) => ({ ...p, gmail_account_id: e.target.value }))}
-          disabled={accountsLoading}
-        >
-          <option value="">(not set)</option>
-          {gmailActiveAccounts.map((a) => (
-            <option key={a.id} value={a.id}>
-              {(a.email_address || a.display_name || a.id) + (a.is_primary ? " (primary)" : "")}
-            </option>
-          ))}
-        </select>
-
-        <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button
-            type="button"
-            className="btnSecondary"
-            onClick={() => {
-              const primary = gmailAccounts.find((a) => a.is_primary && a.is_active);
-              if (primary) setSettings((p: any) => ({ ...p, gmail_account_id: primary.id }));
-            }}
-            disabled={accountsLoading}
-          >
-            Use Primary Inbox as Default
-          </button>
-
-          <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
-            {saving ? "Saving…" : "Save Inbox Settings"}
-          </button>
-        </div>
-      </div>
-
-      <div className="field">
-        <div className="fieldLabel">Enabled Inboxes (multi-inbox)</div>
-        <div className="fieldHelper">
-          Maps to <span className="mono">gmail_enabled_account_ids</span>. You can enable multiple inboxes to include in summaries.
-        </div>
-
-        <div className="checkGrid">
-          {gmailActiveAccounts.map((a) => {
-            const enabled: string[] = Array.isArray(settings.gmail_enabled_account_ids)
-              ? settings.gmail_enabled_account_ids
-              : [];
-            const checked = enabled.includes(a.id);
-            return (
-              <label key={a.id} className="checkRow">
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() => {
-                    const next = checked ? enabled.filter((x) => x !== a.id) : [...enabled, a.id];
-                    setSettings((p: any) => ({ ...p, gmail_enabled_account_ids: next }));
-                  }}
-                />
-                <span className="checkText">
-                  {a.email_address || a.display_name || a.id}{" "}
-                  <span className="muted mono" style={{ marginLeft: 6 }}>
-                    {a.id}
-                  </span>
-                </span>
-              </label>
-            );
-          })}
-          {gmailActiveAccounts.length === 0 ? <div className="muted">No active Gmail accounts found.</div> : null}
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div className="panel" style={{ marginTop: 14 }}>
-    <div className="panelTitle">Connected Gmail Accounts</div>
-    <div className="panelSub">
-      Primary/Active flags are stored on the email account records. Primary does not automatically change Gmail Summaries default inbox unless you set it above.
-    </div>
-
-    <div style={{ marginTop: 12 }}>
-      {accountsLoading ? (
-        <div className="muted">Loading…</div>
-      ) : gmailAccounts.length === 0 ? (
-        <div className="muted">No Gmail accounts found.</div>
-      ) : (
-        <div className="list">
-          {gmailAccounts.map((a) => (
-            <div key={a.id} className="rowCard">
-              <div style={{ minWidth: 0 }}>
-                <div className="rowTitle">{a.email_address || a.display_name || a.id}</div>
-                <div className="rowSub">
-                  <span className="mono">{a.id}</span> · {a.is_primary ? "Primary" : "Secondary"} ·{" "}
-                  {a.is_active ? "Active" : "Inactive"}
-                </div>
-              </div>
-
-              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
-                <span className={`pill ${a.is_active ? "pillOn" : "pillOff"}`}>{a.is_active ? "Active" : "Inactive"}</span>
-
-                <button
-                  className={a.is_primary ? "btnPrimary" : "btnSecondary"}
-                  type="button"
-                  onClick={() => setPrimaryAccount(a.id)}
-                  disabled={accountsLoading}
-                >
-                  {a.is_primary ? "Primary" : "Make Primary"}
-                </button>
-
-                <button
-                  className="btnSecondary"
-                  type="button"
-                  onClick={() => toggleAccountActive(a.id, !a.is_active)}
-                  disabled={accountsLoading}
-                >
-                  {a.is_active ? "Disable" : "Enable"}
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-
-    <div className="actions" style={{ marginTop: 12 }}>
-      <button
-        className="btnSecondary"
-        type="button"
-        onClick={async () => {
-          try {
-            setError(null);
-            await Promise.all([loadSettings(), loadAccounts()]);
-          } catch (e: any) {
-            setError(e?.message || String(e));
-          }
-        }}
-      >
-        Refresh
-      </button>
-    </div>
-  </div>
-</SectionRow>
-          <SectionRow
-            title="Render Logs"
-            subtitle="Live logs fetched from Render."
-            open={open.renderLogs}
-            onToggle={() => setOpen((p) => ({ ...p, renderLogs: !p.renderLogs }))}
-          >
-            <div className="panel" style={{ padding: 0 }}>
-              <div style={{ padding: 14 }}>
-                <div className="panelTitle">Render Logs</div>
-                <div className="panelSub">Existing panel embedded near the bottom.</div>
-              </div>
-              <div style={{ padding: 14, paddingTop: 0 }}>
-                <RenderLogsPanel />
-              </div>
-            </div>
-          </SectionRow>
-        </div>
-
-        <footer className="foot">
-          <div className="muted">
-            Concept UI: Skills, Playbooks, Templates are not wired yet. Gmail Summaries enable + inbox selection remains wired.
           </div>
-        </footer>
-      </div>
 
-      <style jsx global>{`
-        :root{
-          --bg:#F6F9FF;
-          --card:#FFFFFF;
-          --border:#E6ECF5;
-          --text:#0F172A;
-          --muted:#64748B;
-          --accent:#06B6D4;
-          --accentSoft: rgba(6,182,212,0.12);
-          --shadow: 0 10px 30px rgba(15,23,42,0.08);
-        }
+          <div className="foot">
+            <button className="btn" disabled={saving || !settings} onClick={saveSettings}>
+              {saving ? "Saving..." : "Save settings"}
+            </button>
+          </div>
 
-        html,body{ margin:0; padding:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
-        .page{ min-height:100vh; position:relative; overflow-x:hidden; }
-        .bg{
-          position: fixed; inset:0;
-          background-image:url("/circuit-watermark.jpg");
-          background-size:cover; background-position:center;
-          opacity:0.045; pointer-events:none;
-        }
-        .wrap{ position:relative; z-index:1; max-width:1080px; margin:0 auto; padding:22px 18px 50px; }
+          <div className="section">
+            <h2>Render Logs</h2>
+            <RenderLogsPanel />
+          </div>
+        </>
+      )}
 
-        .top{
-          display:flex; justify-content:space-between; gap:16px; align-items:flex-start;
-          background: var(--card);
-          border:1px solid var(--border);
-          border-radius:18px;
-          padding:18px;
-          box-shadow: var(--shadow);
-        }
-        .brand{ font-size:22px; font-weight:900; letter-spacing:-0.02em; }
-        .subtitle{ margin-top:4px; color:var(--muted); font-size:13px; }
-        .who{ text-align:right; min-width:220px; }
-        .muted{ color:var(--muted); font-size:12px; }
-        .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-
-        .alert{
-          margin-top:14px; padding:14px 16px;
-          border-radius:16px;
-          border:1px solid rgba(239,68,68,0.35);
-          background: rgba(239,68,68,0.08);
-          box-shadow: var(--shadow);
-        }
-        .alertTitle{ font-weight:900; }
-        .alertBody{ margin-top:6px; white-space:pre-wrap; font-size:13px; }
-
-        .stack{ margin-top:16px; display:grid; gap:14px; }
-
-        .sectionShell{
-          border-radius:18px;
-          background: var(--card);
-          border:1px solid var(--border);
-          box-shadow: var(--shadow);
-          overflow:hidden;
-        }
-        .sectionHeader{
-          width:100%; display:flex; align-items:center; gap:12px;
-          padding:16px;
-          background:transparent; border:none;
-          cursor:pointer; text-align:left;
-        }
-        .plus{
-          width:22px; height:22px; border-radius:8px;
-          display:inline-flex; align-items:center; justify-content:center;
-          border:1px solid var(--border);
-          background: rgba(15,23,42,0.02);
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-          font-size:16px;
-        }
-        .sectionText{ flex:1; min-width:0; }
-        .sectionTitle{ font-weight:900; }
-        .sectionSub{ margin-top:4px; color:var(--muted); font-size:13px; line-height:1.35; }
-        .sectionRight{ flex:0 0 auto; }
-        .sectionBody{ padding:16px; padding-top:0; }
-        .sectionBody::before{ content:""; display:block; height:1px; background:var(--border); margin-bottom:16px; }
-
-        .panel{
-          background: var(--card);
-          border:1px solid var(--border);
-          border-radius:18px;
-          padding:14px;
-          box-shadow: var(--shadow);
-        }
-        .panelInset{
-          background: rgba(6,182,212,0.03);
-          border:1px solid rgba(6,182,212,0.18);
-          border-radius:16px;
-          padding:14px;
-        }
-        .panelTitle{ font-weight:900; font-size:14px; }
-        .panelSub{ margin-top:4px; color:var(--muted); font-size:12px; line-height:1.35; }
-
-        .grid2{ display:grid; grid-template-columns: 1.25fr 1fr; gap:14px; }
-        @media (max-width: 980px){ .grid2{ grid-template-columns: 1fr; } }
-
-        .tiles{
-          display:grid;
-          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-          gap:14px;
-        }
-        .tile{
-          text-align:left;
-          border-radius:16px;
-          border:1px solid var(--border);
-          background: var(--card);
-          padding:14px;
-          cursor:pointer;
-          box-shadow: var(--shadow);
-        }
-        .tile.active{
-          border:1px solid rgba(6,182,212,0.6);
-          box-shadow: 0 12px 34px rgba(6,182,212,0.10);
-        }
-        .tileTop{ display:flex; justify-content:space-between; align-items:center; gap:10px; }
-        .tileTitle{ font-weight:900; }
-        .tileDesc{ margin-top:6px; font-size:13px; color:var(--muted); line-height:1.35; }
-
-        .pill{
-          font-size:12px;
-          padding:4px 10px;
-          border-radius:999px;
-          border:1px solid var(--border);
-          font-weight:800;
-          white-space:nowrap;
-        }
-        .pillOn{ background: var(--accentSoft); color: #0e7490; border-color: rgba(6,182,212,0.28); }
-        .pillOff{ background: rgba(100,116,139,0.08); color: #475569; }
-
-        .form{ margin-top:14px; display:grid; gap:14px; }
-        .field{ display:grid; gap:6px; }
-        .fieldLabel{ font-weight:800; }
-        .fieldHelper{ color:var(--muted); font-size:12px; }
-        .input{
-          width:100%;
-          padding:12px;
-          border-radius:12px;
-          border:1px solid var(--border);
-          background: #ffffff;
-          color: var(--text);
-          outline:none;
-          box-shadow: 0 6px 18px rgba(15,23,42,0.05);
-        }
-
-        .switchRow{ display:flex; align-items:center; justify-content:space-between; gap:14px; }
-        .switchText{ min-width:0; }
-        .switchLabel{ font-weight:800; }
-        .switchHelper{ margin-top:4px; color:var(--muted); font-size:12px; line-height:1.35; }
-        .switch{
-          width:44px; height:26px;
-          border-radius:999px;
-          border:1px solid var(--border);
-          background: #f1f5f9;
-          position:relative;
-          cursor:pointer;
-          box-shadow: 0 6px 18px rgba(15,23,42,0.06);
-          flex: 0 0 auto;
-        }
-        .switch.on{ background: rgba(6,182,212,0.18); border-color: rgba(6,182,212,0.28); }
-        .knob{
-          position:absolute; top:3px; left:3px;
-          width:20px; height:20px; border-radius:999px;
-          background:#fff;
-          border:1px solid rgba(15,23,42,0.10);
-          transition: left 120ms ease;
-        }
-        .switch.on .knob{ left:21px; background:#06B6D4; border-color: rgba(6,182,212,0.35); }
-
-        .actions{ display:flex; gap:10px; flex-wrap:wrap; }
-        .btnPrimary{
-          padding:10px 14px;
-          border-radius:12px;
-          border:1px solid rgba(6,182,212,0.45);
-          background: rgba(6,182,212,0.16);
-          color:#0b4f5f;
-          font-weight:900;
-          cursor:pointer;
-        }
-
-.btnSecondary{
-  padding:10px 14px;
-  border-radius:14px;
-  border:1px solid var(--border);
-  background:#fff;
-  color:var(--text);
-  font-weight:800;
-  cursor:pointer;
-  box-shadow: var(--shadow);
-}
-.btnSecondary:hover{ border-color: rgba(6,182,212,0.35); background: rgba(6,182,212,0.04); }
-
-.table{
-  width:100%;
-  border-collapse:separate;
-  border-spacing:0;
-  font-size:13px;
-}
-.table th, .table td{
-  padding:10px 12px;
-  border-bottom:1px solid var(--border);
-  text-align:left;
-  vertical-align:top;
-  background:#fff;
-}
-.table th{
-  position:sticky;
-  top:0;
-  background: rgba(246,249,255,0.9);
-  backdrop-filter: blur(6px);
-  font-size:12px;
-  letter-spacing:0.02em;
-  text-transform:uppercase;
-  color: var(--muted);
-}
-
-        .dropZone{
-          margin-top:12px;
-          border-radius:16px;
-          border:1px dashed rgba(6,182,212,0.35);
-          background: rgba(6,182,212,0.03);
-          padding:12px;
-        }
-        .dropZone.over{
-          border-color: rgba(6,182,212,0.70);
-          background: rgba(6,182,212,0.06);
-        }
-        .dropHead{ display:flex; justify-content:space-between; gap:10px; padding-bottom:10px; }
-        .dropTitle{ font-weight:900; }
-        .dropSub{ color:var(--muted); font-size:12px; margin-top:4px; }
-        .dropBody{ padding-top:8px; }
-
-        .list{ display:grid; gap:10px; margin-top:12px; }
-        .listItem{
-          display:flex; align-items:center; justify-content:space-between; gap:12px;
-          padding:10px 12px;
-          border-radius:14px;
-          border:1px solid var(--border);
-          background: #ffffff;
-        }
-        .listSelect{
-          border:1px solid var(--border);
-          background:#fff;
-          border-radius:14px;
-          padding:10px 12px;
-          cursor:pointer;
-          text-align:left;
-          box-shadow: 0 6px 18px rgba(15,23,42,0.05);
-        }
-        .listSelect.active{ border-color: rgba(6,182,212,0.55); background: rgba(6,182,212,0.06); }
-        .row{ display:flex; justify-content:space-between; align-items:center; gap:12px; }
-        .rowMain{ min-width:0; }
-        .rowTitle{ font-weight:900; }
-        .rowSub{ margin-top:4px; color:var(--muted); font-size:12px; }
-
-        .rowCard{
-          display:flex; justify-content:space-between; align-items:center; gap:12px;
-          padding:12px;
-          border-radius:14px;
-          border:1px solid var(--border);
-          background:#fff;
-        }
-
-        .chips{ display:flex; gap:10px; flex-wrap:wrap; padding-top:6px; }
-        .chip{
-          display:flex; align-items:center; gap:10px;
-          padding:8px 10px;
-          border-radius:999px;
-          border:1px solid var(--border);
-          background:#fff;
-        }
-        .chipX{
-          border:none;
-          background: rgba(239,68,68,0.10);
-          color:#b91c1c;
-          border-radius:999px;
-          width:22px;
-          height:22px;
-          cursor:pointer;
-          font-weight:900;
-        }
-
-        .checkGrid{ display:grid; gap:8px; padding-top:6px; }
-        .checkRow{ display:flex; align-items:center; gap:10px; }
-        .checkText{ color: var(--text); font-size:13px; }
-
-        .foot{ margin-top:18px; padding: 6px 4px 0; }
-      `}</style>
+      <style jsx>{baseStyles}</style>
     </div>
   );
 }
 
-export async function getServerSideProps(ctx: GetServerSidePropsContext) {
-  const { getServerSession } = await import("next-auth/next");
-  const { authOptions } = await import("./api/auth/[...nextauth]");
-  const session = await getServerSession(ctx.req, ctx.res, authOptions);
+const baseStyles = `
+.wrap{ font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 22px; background:#0b0e14; min-height:100vh; color:#e6e6e6;}
+.topbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;}
+.brand{ font-weight:800; letter-spacing:.4px; }
+.topbarRight{ display:flex; gap:12px; align-items:center;}
+.user{ font-size:13px; opacity:.85; }
+.grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap:14px; }
+.section{ margin-top:22px; }
+.card{ background:#121726; border:1px solid #1f2740; border-radius:14px; padding:14px 14px 12px; }
+h1,h2,h3{ margin:0 0 10px 0; }
+h2{ font-size:16px; }
+h3{ font-size:15px; }
+.muted{ opacity:.7; font-size:13px; margin-bottom:8px; }
+.alert{ padding:10px 12px; border-radius:12px; margin-bottom:12px; font-size:13px; border:1px solid transparent; }
+.alert.error{ background:#2a1212; border-color:#5a1d1d; }
+.alert.ok{ background:#112a16; border-color:#1d5a29; }
+.btn{ background:#2b7cff; border:0; color:white; padding:9px 12px; border-radius:10px; cursor:pointer; font-weight:700; }
+.btn.secondary{ background:#2a334d; }
+.btn.tiny{ padding:6px 8px; border-radius:8px; font-size:12px; }
+.btn:disabled{ opacity:.6; cursor:not-allowed;}
+.row{ display:flex; gap:10px; align-items:center; margin:8px 0 12px; }
+.field{ margin:10px 0; }
+.fieldLabel{ font-size:13px; font-weight:800; margin-bottom:6px; }
+.fieldHelper{ font-size:12px; opacity:.7; margin-bottom:6px; }
+.input{ width:100%; padding:10px 10px; border-radius:10px; border:1px solid #2a334d; background:#0e1322; color:#e6e6e6; outline:none; }
+.switchRow{ display:flex; gap:10px; align-items:flex-start; margin:10px 0; }
+.switchLabel{ font-size:13px; font-weight:800; }
+.switchHelper{ font-size:12px; opacity:.7; margin-top:2px; }
+.table{ border:1px solid #2a334d; border-radius:12px; overflow:hidden; margin-top:8px;}
+.thead,.trow{ display:grid; grid-template-columns: 1fr 80px 80px; gap:10px; padding:8px 10px; }
+.thead{ background:#0e1322; font-size:12px; opacity:.8; font-weight:800;}
+.trow{ border-top:1px solid #2a334d; font-size:13px;}
+.mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px;}
+.prio{ margin-top:10px; display:flex; flex-direction:column; gap:8px;}
+.prioRow{ display:flex; justify-content:space-between; align-items:center; padding:10px 10px; border:1px solid #2a334d; border-radius:12px; background:#0e1322;}
+.prioName{ font-weight:800; font-size:13px; }
+.prioBtns{ display:flex; gap:8px; }
+.foot{ margin-top:18px; }
+`;
 
+
+export async function getServerSideProps(ctx: GetServerSidePropsContext) {
+  const session = await getServerSession(ctx.req, ctx.res, authOptions);
   if (!session) {
     return {
       redirect: {
