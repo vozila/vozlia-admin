@@ -28,6 +28,16 @@ const KEY_BY_SKILL_ID: Record<string, SkillKey> = Object.fromEntries(
   Object.entries(SKILL_ID_BY_KEY).map(([k, sid]) => [sid, k as SkillKey])
 ) as Record<string, SkillKey>;
 
+const DEFAULT_INVESTMENT_LLM_PROMPT = `You are an investment reporting voice assistant.
+For each ticker, speak:
+1) current price,
+2) previous close,
+3) percent change,
+4) a brief summary of the most important recent news (last 24 hours),
+5) any new analyst upgrades/downgrades or guidance if available.
+
+Keep each ticker under ~20 seconds. After each ticker say: "Say next to continue."`;
+
 
 type TemplateItem =
   | { kind: "skill"; key: SkillKey }
@@ -264,7 +274,7 @@ export default function AdminPage() {
     autoExecuteAfterGreeting: boolean;
     engagementPrompt: string;
     llmPrompt: string;
-    tickers?: string; // investment_reporting only (comma-separated)
+    tickers?: string; // comma-separated
   };
 
   const [skillCfg, setSkillCfg] = useState<Record<SkillKey, SkillCfgState>>({
@@ -273,7 +283,7 @@ export default function AdminPage() {
     calendar: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
     web_search: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
     weather: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "" },
-    investment_reporting: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "", llmPrompt: "", tickers: "" },
+    investment_reporting: { enabled: false, addToGreeting: false, autoExecuteAfterGreeting: false, engagementPrompt: "stock report", llmPrompt: DEFAULT_INVESTMENT_LLM_PROMPT, tickers: "" },
   });
 
   // Greeting priority list (admin configurable)
@@ -360,18 +370,29 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
           enabled: key === "gmail_summaries" ? !!(data as any).gmail_summary_enabled : !!cfg.enabled,
           addToGreeting: !!cfg.add_to_greeting,
           autoExecuteAfterGreeting: !!cfg.auto_execute_after_greeting,
-          engagementPrompt: Array.isArray(cfg.engagement_phrases) ? cfg.engagement_phrases.join("
-") : "",
-          llmPrompt: typeof cfg.llm_prompt === "string" ? cfg.llm_prompt : "",
+          engagementPrompt:
+            Array.isArray(cfg.engagement_phrases)
+              ? cfg.engagement_phrases.join("
+")
+              : key === "investment_reporting"
+                ? "stock report"
+                : "",
+          llmPrompt:
+            typeof cfg.llm_prompt === "string"
+              ? cfg.llm_prompt
+              : key === "investment_reporting"
+                ? DEFAULT_INVESTMENT_LLM_PROMPT
+                : "",
           tickers:
             key === "investment_reporting"
-              ? (typeof cfg.tickers_raw === "string" && cfg.tickers_raw.trim()
-                  ? cfg.tickers_raw
-                  : Array.isArray(cfg.tickers)
-                    ? (cfg.tickers as any[]).join(", ")
+              ? (typeof (cfg as any).tickers_raw === "string"
+                  ? (cfg as any).tickers_raw
+                  : Array.isArray((cfg as any).tickers)
+                    ? (cfg as any).tickers.join(", ")
                     : "")
-              : next[key].tickers,
+              : (next[key] as any).tickers,
         };
+
       }
       return next;
     });
@@ -433,6 +454,14 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
             .map((s) => s.trim())
             .filter(Boolean);
 
+        const parseTickers = (v: string) =>
+          (v || "")
+            .replace(/\s+/g, " ")
+            .replace(/,/g, "\n")
+            .split("\n")
+            .map((s) => s.trim().toUpperCase())
+            .filter(Boolean);
+
         (Object.keys(SKILL_ID_BY_KEY) as SkillKey[]).forEach((key) => {
           const sid = SKILL_ID_BY_KEY[key];
           const cfg = (skillCfg as any)[key] || {};
@@ -442,6 +471,12 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
             auto_execute_after_greeting: !!cfg.autoExecuteAfterGreeting,
             engagement_phrases: parseLines(cfg.engagementPrompt || ""),
             llm_prompt: cfg.llmPrompt || "",
+            ...(key === "investment_reporting"
+              ? {
+                  tickers_raw: cfg.tickers || "",
+                  tickers: parseTickers(cfg.tickers || ""),
+                }
+              : {}),
           };
         });
 
@@ -474,40 +509,45 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 
       setSettings(data);
 
-      // Re-sync skill fields from server (defensive: supports older responses)
+      // Re-sync Gmail skill fields from server (defensive: supports older responses)
       const skills =
-        data && typeof data === "object" && (data as any).skills_config && typeof (data as any).skills_config === "object"
-          ? (data as any).skills_config
+        data && typeof data === "object" && data.skills_config && typeof data.skills_config === "object"
+          ? data.skills_config
           : {};
+      const gmailSkill = (skills as any).gmail_summary || {};
 
-      setSkillCfg((cur) => {
-        const next: any = { ...cur };
-        const skillsObj: any = skills || {};
-        for (const key of Object.keys(SKILL_ID_BY_KEY) as SkillKey[]) {
-          const sid = SKILL_ID_BY_KEY[key];
-          const cfg = skillsObj[sid] || {};
-          next[key] = {
-            ...next[key],
-            enabled: key === "gmail_summaries" ? !!(data as any).gmail_summary_enabled : !!cfg.enabled,
-            addToGreeting: !!cfg.add_to_greeting,
-            autoExecuteAfterGreeting: !!cfg.auto_execute_after_greeting,
-            engagementPrompt: Array.isArray(cfg.engagement_phrases) ? cfg.engagement_phrases.join("\n") : "",
-            llmPrompt: typeof cfg.llm_prompt === "string" ? cfg.llm_prompt : "",
-            tickers:
-              key === "investment_reporting"
-                ? (typeof cfg.tickers_raw === "string" && cfg.tickers_raw.trim()
-                    ? cfg.tickers_raw
-                    : Array.isArray(cfg.tickers)
-                      ? (cfg.tickers as any[]).join(", ")
-                      : "")
-                : next[key].tickers,
-          };
-        }
-        return next;
+      setSkillCfg((cur) => ({
+        ...cur,
+        gmail_summaries: {
+          ...cur.gmail_summaries,
+          enabled: !!data.gmail_summary_enabled,
+          addToGreeting: !!gmailSkill.add_to_greeting,
+          autoExecuteAfterGreeting: !!gmailSkill.auto_execute_after_greeting,
+          engagementPrompt: Array.isArray(gmailSkill.engagement_phrases) ? gmailSkill.engagement_phrases.join("\n") : "",
+          llmPrompt: typeof gmailSkill.llm_prompt === "string" ? gmailSkill.llm_prompt : "",
+        },
+      }));
+
+      setMemoryEngagementPrompt(Array.isArray(data.memory_engagement_phrases) ? data.memory_engagement_phrases.join("\n") : "");
+    } catch (e: unknown) {
+      setError(String((e as any)?.message ?? e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+
+  async function patchAccount(id: string, patch: Partial<EmailAccount>) {
+    setError(null);
+    try {
+      const res = await fetch(`/api/admin/email-accounts/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
       });
-
-      setMemoryEngagementPrompt(Array.isArray((data as any).memory_engagement_phrases) ? (data as any).memory_engagement_phrases.join("\n") : "");
-await loadAccounts();
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to update email account");
+      await loadAccounts();
     } catch (e: any) {
       setError(e?.message || String(e));
     }
@@ -706,21 +746,25 @@ await loadAccounts();
                   />
 
                   {activeSkill === "investment_reporting" ? (
-                    <TextField
-                      label="Tickers (comma-separated)"
-                      value={skillCfg[activeSkill].tickers || ""}
-                      onChange={(v) => setSkillCfg((cur) => ({ ...cur, [activeSkill]: { ...cur[activeSkill], tickers: v } }))}
-                      placeholder="e.g. AAPL, MSFT, TSLA"
-                      helper="Wired: saved to skills_config.investment_reporting.tickers"
-                    />
-                  ) : null}
-
-                  {activeSkill !== "gmail_summaries" ? (
-                    <div className="actions" style={{ marginTop: 12 }}>
-                      <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
-                        {saving ? "Saving…" : "Save Skill Settings"}
-                      </button>
-                    </div>
+                    <>
+                      <TextField
+                        label="Tickers (comma-separated)"
+                        value={skillCfg.investment_reporting.tickers || ""}
+                        onChange={(v) =>
+                          setSkillCfg((cur) => ({
+                            ...cur,
+                            investment_reporting: { ...cur.investment_reporting, tickers: v },
+                          }))
+                        }
+                        placeholder="AAPL, MSFT, TSLA"
+                        helper="Wired"
+                      />
+                      <div className="actions">
+                        <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
+                          {saving ? "Saving…" : "Save Investment Reporting"}
+                        </button>
+                      </div>
+                    </>
                   ) : null}
 
                   {activeSkill === "gmail_summaries" ? (
