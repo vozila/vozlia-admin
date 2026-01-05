@@ -2,6 +2,7 @@ import type { GetServerSidePropsContext } from "next";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSession } from "next-auth/react";
 import { RenderLogsPanel } from "../components/RenderLogsPanel";
+import { KBUploadPanel } from "../components/KBUploadPanel";
  
 type EmailAccount = {
   id: string;
@@ -1313,7 +1314,9 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                 <div className="panelSub">Existing panel embedded near the bottom.</div>
               </div>
               <div style={{ padding: 14, paddingTop: 0 }}>
-                <RenderLogsPanel />
+                <KBUploadPanel />
+
+        <RenderLogsPanel />
               </div>
             </div>
           </SectionRow>
