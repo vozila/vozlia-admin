@@ -1,6 +1,6 @@
 import type { GetServerSidePropsContext } from "next";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useSession } from "next-auth/react";
+import { useSession, signIn, signOut } from "next-auth/react";
 import { RenderLogsPanel } from "../components/RenderLogsPanel";
 import { KBUploadPanel } from "../components/KBUploadPanel";
  
@@ -569,9 +569,21 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
             <div className="brand">Vozlia</div>
             <div className="subtitle">Admin Portal</div>
           </div>
+
           <div className="who">
-            <div className="muted">Signed in as</div>
-            <div className="mono">{primaryEmail || "admin"}</div>
+            <div>
+              <div className="muted">Signed in as</div>
+              <div className="mono">{primaryEmail || "admin"}</div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <button type="button" className="btnSecondary" onClick={() => signIn(undefined, { callbackUrl: "/admin" })}>
+                Refresh Session
+              </button>
+              <button type="button" className="btnSecondary" onClick={() => signOut({ callbackUrl: "/" })}>
+                Logout
+              </button>
+            </div>
           </div>
         </header>
 
@@ -1189,6 +1201,16 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
             disabled={accountsLoading}
           >
             Use Primary Inbox as Default
+          </button>
+          <button
+            type="button"
+            className="btnSecondary"
+            onClick={() => {
+              window.location.href = "/api/admin/gmail/connect";
+            }}
+            disabled={accountsLoading}
+          >
+            Reconnect Gmail (refresh token)
           </button>
 
           <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
