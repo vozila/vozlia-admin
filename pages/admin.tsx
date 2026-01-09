@@ -1056,19 +1056,14 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
   </div>
 
   <div className="panel" style={{ marginTop: 14 }}>
-  <div className="panelTitle">Memory Bank</div>
-  <div className="panelSub">Search and browse long-term memory entries (wired via Control Plane).</div>
+    <div className="panelTitle">Memory Bank</div>
+    <div className="panelSub">Search and browse long-term memory entries (wired via Control Plane).</div>
 
-  <div style={{ marginTop: 12 }}>
-    <AgentLongTermMemoryTable />
-  </div>
-</div>
-
-
-    
+    <div style={{ marginTop: 12 }}>
+      <AgentLongTermMemoryTable />
+    </div>
   </div>
 </SectionRow>
-
 <SectionRow
   title="Chit-Chat"
   subtitle="Controls for chitchat behavior (dead air response delay)."
