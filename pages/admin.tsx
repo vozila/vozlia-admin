@@ -526,14 +526,11 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
     };
 
     try {
-      const res = await fetch("/api/admin/settings", {
+      const data = await fetchJsonOrThrow<any>("/api/admin/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to save settings");
 
       setSettings(data);
 
@@ -568,13 +565,11 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
   async function patchAccount(id: string, patch: Partial<EmailAccount>) {
     setError(null);
     try {
-      const res = await fetch(`/api/admin/email-accounts/${encodeURIComponent(id)}`, {
+      await fetchJsonOrThrow(`/api/admin/email-accounts/${encodeURIComponent(id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to update email account");
       await loadAccounts();
     } catch (e: any) {
       setError(e?.message || String(e));
