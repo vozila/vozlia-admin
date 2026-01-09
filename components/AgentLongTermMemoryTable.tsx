@@ -1,299 +1,296 @@
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type MemoryRow = {
   id: string;
-  created_at: string;
-  tenant_id: string;
-  caller_id: string;
+  created_at?: string;
+  tenant_id?: string;
+  caller_id?: string;
   call_sid?: string | null;
-  kind: string;
-  skill_key: string;
-  text: string;
+  kind?: string;
+  skill_key?: string;
+  text?: string;
   data_json?: any;
   tags_json?: any;
 };
 
-type ListResp = {
-  items: MemoryRow[];
-  has_more?: boolean;
-  next_offset?: number | null;
-};
+type ListPayload =
+  | MemoryRow[]
+  | {
+      items?: MemoryRow[];
+      rows?: MemoryRow[];
+      data?: MemoryRow[];
+      total?: number;
+      next_offset?: number | null;
+      offset?: number;
+      limit?: number;
+    };
 
-function fmtTs(iso?: string) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString();
+function normalizeList(payload: ListPayload): { rows: MemoryRow[]; total?: number; nextOffset?: number | null } {
+  if (Array.isArray(payload)) return { rows: payload };
+
+  const anyPayload = payload as any;
+  const rows =
+    (Array.isArray(anyPayload?.items) && anyPayload.items) ||
+    (Array.isArray(anyPayload?.rows) && anyPayload.rows) ||
+    (Array.isArray(anyPayload?.data) && anyPayload.data) ||
+    [];
+
+  const total = typeof anyPayload?.total === "number" ? anyPayload.total : undefined;
+  const nextOffset = typeof anyPayload?.next_offset === "number" ? anyPayload.next_offset : null;
+
+  return { rows, total, nextOffset };
 }
 
-function truncate(s: string, n: number) {
-  if (!s) return "";
-  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+async function fetchJsonOrThrow<T = any>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, init);
+  const text = await res.text();
+
+  let data: any = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+
+  if (!res.ok) {
+    const msg =
+      (data && (data.error || data.detail || data.message)) ||
+      (text ? text.slice(0, 800) : res.statusText) ||
+      `HTTP ${res.status}`;
+    throw new Error(`${url} failed (${res.status}): ${typeof msg === "string" ? msg : JSON.stringify(msg)}`);
+  }
+
+  if (data === null) {
+    // some successful endpoints might return empty body; treat as empty object
+    if (!text) return {} as T;
+    throw new Error(`${url} returned non-JSON (HTTP ${res.status}). First bytes:\n${text.slice(0, 800)}`);
+  }
+
+  return data as T;
 }
 
 export default function AgentLongTermMemoryTable() {
   const [q, setQ] = useState("");
-  const [tenantId, setTenantId] = useState("");
-  const [callerId, setCallerId] = useState("");
-  const [skillKey, setSkillKey] = useState("");
-  const [kind, setKind] = useState("");
+  const [limit, setLimit] = useState(50);
+  const [offset, setOffset] = useState(0);
 
-  const [limit, setLimit] = useState(100);
+  const [rows, setRows] = useState<MemoryRow[]>([]);
+  const [total, setTotal] = useState<number | undefined>(undefined);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
 
-  const [items, setItems] = useState<MemoryRow[]>([]);
-  const [hasMore, setHasMore] = useState(false);
-  const [nextOffset, setNextOffset] = useState<number | null>(0);
-
-  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const paramsKey = useMemo(() => {
-    return JSON.stringify({
-      q: q.trim(),
-      tenant_id: tenantId.trim(),
-      caller_id: callerId.trim(),
-      skill_key: skillKey.trim(),
-      kind: kind.trim(),
-      limit,
-    });
-  }, [q, tenantId, callerId, skillKey, kind, limit]);
+  // Debounce search so we don't spam the API.
+  const debouncedQ = useMemo(() => q.trim(), [q]);
 
-  function buildUrl(offset: number) {
-    const p = new URLSearchParams();
-    p.set("limit", String(limit));
-    p.set("offset", String(offset));
-
-    if (q.trim()) p.set("q", q.trim());
-    if (tenantId.trim()) p.set("tenant_id", tenantId.trim());
-    if (callerId.trim()) p.set("caller_id", callerId.trim());
-    if (skillKey.trim()) p.set("skill_key", skillKey.trim());
-    if (kind.trim()) p.set("kind", kind.trim());
-
-    return `/api/admin/memory/longterm?${p.toString()}`;
-  }
-
-  async function loadFirstPage() {
-    setBusy(true);
+  async function load() {
+    setLoading(true);
     setError(null);
     try {
-      const res = await fetch(buildUrl(0));
-      const text = await res.text();
+      const params = new URLSearchParams();
+      params.set("limit", String(limit));
+      params.set("offset", String(offset));
+      if (debouncedQ) params.set("q", debouncedQ);
 
-      let data: ListResp | any = {};
-      try {
-        data = text ? JSON.parse(text) : {};
-      } catch {
-        throw new Error(`Bad JSON from /api/admin/memory/longterm (status ${res.status})`);
-      }
-
-      if (!res.ok) {
-        throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
-      }
-
-      setItems(Array.isArray(data.items) ? data.items : []);
-      setHasMore(!!data.has_more);
-      setNextOffset(typeof data.next_offset === "number" ? data.next_offset : null);
+      const payload = await fetchJsonOrThrow<ListPayload>(`/api/admin/memory/longterm?${params.toString()}`);
+      const norm = normalizeList(payload);
+      setRows(norm.rows);
+      setTotal(norm.total);
+      setNextOffset(norm.nextOffset);
     } catch (e: any) {
       setError(e?.message || String(e));
-      setItems([]);
-      setHasMore(false);
+      setRows([]);
+      setTotal(undefined);
       setNextOffset(null);
     } finally {
-      setBusy(false);
-    }
-  }
-
-  async function loadMore() {
-    if (!hasMore || nextOffset == null) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(buildUrl(nextOffset));
-      const text = await res.text();
-
-      let data: ListResp | any = {};
-      try {
-        data = text ? JSON.parse(text) : {};
-      } catch {
-        throw new Error(`Bad JSON from /api/admin/memory/longterm (status ${res.status})`);
-      }
-
-      if (!res.ok) {
-        throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
-      }
-
-      const newItems = Array.isArray(data.items) ? data.items : [];
-      setItems((cur) => [...cur, ...newItems]);
-      setHasMore(!!data.has_more);
-      setNextOffset(typeof data.next_offset === "number" ? data.next_offset : null);
-    } catch (e: any) {
-      setError(e?.message || String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deleteRow(id: string) {
-    const ok = confirm("Delete this long-term memory row? This is permanent.");
-    if (!ok) return;
-
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/admin/memory/longterm/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-      });
-      const text = await res.text();
-      let data: any = {};
-      try {
-        data = text ? JSON.parse(text) : {};
-      } catch {
-        // ignore
-      }
-
-      if (!res.ok) {
-        throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
-      }
-
-      setItems((cur) => cur.filter((r) => r.id !== id));
-    } catch (e: any) {
-      setError(e?.message || String(e));
-    } finally {
-      setBusy(false);
+      setLoading(false);
     }
   }
 
   useEffect(() => {
     const t = setTimeout(() => {
-      loadFirstPage();
+      // Reset to first page when searching
+      setOffset(0);
     }, 250);
     return () => clearTimeout(t);
+  }, [debouncedQ, limit]);
+
+  useEffect(() => {
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paramsKey]);
+  }, [offset, limit, debouncedQ]);
+
+  async function onDelete(id: string) {
+    const ok = window.confirm("Delete this long-term memory row? This cannot be undone.");
+    if (!ok) return;
+
+    setDeletingId(id);
+    setError(null);
+    try {
+      await fetchJsonOrThrow(`/api/admin/memory/longterm/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await load();
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   return (
     <div>
-      <div className="grid2" style={{ marginTop: 12 }}>
-        <div className="field">
-          <div className="fieldLabel">Search</div>
-          <div className="fieldHelper">Substring match across text, skill_key, caller_id, call_sid, tenant_id.</div>
-          <input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. 'pricing' or a caller ID" />
-        </div>
-
-        <div className="field">
-          <div className="fieldLabel">Tenant ID (optional)</div>
-          <div className="fieldHelper">Useful if you have multiple tenants sharing the same DB.</div>
-          <input className="input" value={tenantId} onChange={(e) => setTenantId(e.target.value)} placeholder="tenant UUID" />
-        </div>
-      </div>
-
-      <div className="grid2" style={{ marginTop: 12 }}>
-        <div className="field">
-          <div className="fieldLabel">Caller ID (optional)</div>
-          <input className="input" value={callerId} onChange={(e) => setCallerId(e.target.value)} placeholder="caller id / phone hash / etc" />
-        </div>
-
-        <div className="field">
-          <div className="fieldLabel">Skill Key (optional)</div>
-          <input className="input" value={skillKey} onChange={(e) => setSkillKey(e.target.value)} placeholder="e.g. gmail_summary" />
-        </div>
-      </div>
-
-      <div className="grid2" style={{ marginTop: 12 }}>
-        <div className="field">
-          <div className="fieldLabel">Kind (optional)</div>
-          <input className="input" value={kind} onChange={(e) => setKind(e.target.value)} placeholder="turn | skill | event" />
-        </div>
-
-        <div className="field">
-          <div className="fieldLabel">Limit</div>
-          <select className="input" value={String(limit)} onChange={(e) => setLimit(parseInt(e.target.value, 10) || 100)}>
-            <option value="50">50</option>
-            <option value="100">100</option>
-            <option value="200">200</option>
-            <option value="500">500</option>
-          </select>
-        </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 12 }}>
-        <button type="button" className="btn" onClick={loadFirstPage} disabled={busy}>
-          {busy ? "Loading…" : "Refresh"}
-        </button>
-        <div className="muted">
-          {items.length} rows {hasMore ? "(more available)" : ""}
-        </div>
-      </div>
-
       {error ? (
-        <div className="callout" style={{ marginTop: 12 }}>
-          <strong>Error:</strong> {error}
+        <div className="alert" style={{ marginTop: 12 }}>
+          <div className="alertTitle">Memory Bank Error</div>
+          <div className="alertBody">{error}</div>
         </div>
       ) : null}
+
+      <div className="form" style={{ marginTop: 12 }}>
+        <div className="field">
+          <div className="fieldLabel">Search</div>
+          <div className="fieldHelper">Searches across row fields (server-side if supported).</div>
+          <input
+            className="input"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search memories…"
+          />
+        </div>
+
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <button type="button" className="btnSecondary" onClick={() => load()} disabled={loading}>
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
+
+          <button
+            type="button"
+            className="btnSecondary"
+            onClick={() => {
+              setQ("");
+              setOffset(0);
+            }}
+            disabled={loading || (!q && offset === 0)}
+          >
+            Clear
+          </button>
+
+          <div className="field" style={{ margin: 0, minWidth: 140 }}>
+            <div className="fieldLabel">Rows</div>
+            <select
+              className="input"
+              value={limit}
+              onChange={(e) => setLimit(Number(e.target.value))}
+              disabled={loading}
+            >
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={200}>200</option>
+            </select>
+          </div>
+
+          <div className="muted" style={{ paddingTop: 18 }}>
+            {typeof total === "number" ? `Total: ${total}` : rows.length ? `Showing: ${rows.length}` : null}
+          </div>
+        </div>
+      </div>
 
       <div style={{ marginTop: 12, overflowX: "auto" }}>
         <table className="table">
           <thead>
             <tr>
-              <th>Created</th>
-              <th>Tenant</th>
-              <th>Caller</th>
-              <th>Kind</th>
-              <th>Skill</th>
-              <th>Call SID</th>
-              <th>Text</th>
-              <th></th>
+              <th style={{ minWidth: 160 }}>Created</th>
+              <th style={{ minWidth: 220 }}>Tenant / Caller</th>
+              <th style={{ minWidth: 140 }}>Skill / Kind</th>
+              <th style={{ minWidth: 520 }}>Text</th>
+              <th style={{ minWidth: 140 }}>Actions</th>
             </tr>
           </thead>
-          <tbody>
-            {items.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="muted">
-                  {busy ? "Loading…" : "No rows found."}
-                </td>
-              </tr>
-            ) : null}
 
-            {items.map((r) => (
-              <tr key={r.id}>
-                <td style={{ whiteSpace: "nowrap" }}>{fmtTs(r.created_at)}</td>
-                <td style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12 }}>
-                  {truncate(r.tenant_id, 12)}
-                </td>
-                <td style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12 }}>
-                  {truncate(r.caller_id, 14)}
-                </td>
-                <td>{r.kind}</td>
-                <td style={{ whiteSpace: "nowrap" }}>{r.skill_key}</td>
-                <td style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12 }}>
-                  {r.call_sid ? truncate(r.call_sid, 14) : ""}
-                </td>
-                <td style={{ maxWidth: 520 }}>
-                  <div title={r.text} style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {r.text}
-                  </div>
-                </td>
-                <td style={{ whiteSpace: "nowrap" }}>
-                  <button type="button" className="btn danger" onClick={() => deleteRow(r.id)} disabled={busy}>
-                    Delete
-                  </button>
+          <tbody>
+            {loading && rows.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="muted" style={{ padding: 12 }}>
+                  Loading…
                 </td>
               </tr>
-            ))}
+            ) : rows.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="muted" style={{ padding: 12 }}>
+                  No memory rows found.
+                </td>
+              </tr>
+            ) : (
+              rows.map((r) => (
+                <tr key={r.id}>
+                  <td>{r.created_at || "—"}</td>
+
+                  <td>
+                    <div className="mono" style={{ whiteSpace: "nowrap" }}>{r.tenant_id || "—"}</div>
+                    <div className="mono" style={{ whiteSpace: "nowrap", marginTop: 4 }}>{r.caller_id || "—"}</div>
+                    {r.call_sid ? <div className="muted mono" style={{ marginTop: 4 }}>{r.call_sid}</div> : null}
+                  </td>
+
+                  <td>
+                    <div className="mono" style={{ whiteSpace: "nowrap" }}>{r.skill_key || "—"}</div>
+                    <div className="muted" style={{ marginTop: 4 }}>{r.kind || "—"}</div>
+                  </td>
+
+                  {/* FIX: no truncation — wrap and show full text */}
+                  <td style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word" }}>
+                    {r.text || "—"}
+                    {(r.tags_json || r.data_json) ? (
+                      <details style={{ marginTop: 8 }}>
+                        <summary className="muted" style={{ cursor: "pointer" }}>meta</summary>
+                        <pre style={{ marginTop: 8, fontSize: 12, whiteSpace: "pre-wrap" }}>
+                          {JSON.stringify({ tags_json: r.tags_json, data_json: r.data_json }, null, 2)}
+                        </pre>
+                      </details>
+                    ) : null}
+                  </td>
+
+                  <td>
+                    <button
+                      type="button"
+                      className="btnSecondary"
+                      onClick={() => onDelete(r.id)}
+                      disabled={deletingId === r.id}
+                    >
+                      {deletingId === r.id ? "Deleting…" : "Delete"}
+                    </button>
+                    <div className="muted mono" style={{ marginTop: 6 }}>{r.id}</div>
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>
 
-      {hasMore ? (
-        <div style={{ marginTop: 12 }}>
-          <button type="button" className="btn" onClick={loadMore} disabled={busy}>
-            {busy ? "Loading…" : "Load more"}
-          </button>
-        </div>
-      ) : null}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12, alignItems: "center" }}>
+        <button
+          type="button"
+          className="btnSecondary"
+          onClick={() => setOffset((o) => Math.max(0, o - limit))}
+          disabled={loading || offset === 0}
+        >
+          Prev
+        </button>
 
-      <div className="muted" style={{ marginTop: 10 }}>
-        Deleting a row removes it permanently from <code>caller_memory_events</code>.
+        <button
+          type="button"
+          className="btnSecondary"
+          onClick={() => setOffset((o) => o + limit)}
+          disabled={loading || (rows.length < limit && nextOffset === null)}
+        >
+          Next
+        </button>
+
+        <div className="muted">Offset: {offset}</div>
       </div>
     </div>
   );
