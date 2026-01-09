@@ -121,7 +121,7 @@ export default function AgentLongTermMemoryTable() {
 
       setRows(norm.rows);
       setTotal(norm.total);
-      setNextOffset(norm.nextOffset);
+      setNextOffset(norm.nextOffset ?? null);
     } catch (e: any) {
       setError(e?.message || String(e));
       setRows([]);
@@ -288,12 +288,7 @@ export default function AgentLongTermMemoryTable() {
           Prev
         </button>
 
-        <button
-          type="button"
-          className="btnSecondary"
-          onClick={() => canNext && setOffset(nextOffset!)}
-          disabled={loading || !canNext}
-        >
+        <button type="button" className="btnSecondary" onClick={() => canNext && setOffset(nextOffset!)} disabled={loading || !canNext}>
           Next
         </button>
 
