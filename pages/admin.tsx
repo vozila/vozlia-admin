@@ -433,10 +433,12 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 
   async function loadAccounts() {
     setAccountsLoading(true);
-    const res = await fetch("/api/admin/email-accounts");
-    const data = await res.json();
-    setAccounts(Array.isArray(data) ? data : []);
-    setAccountsLoading(false);
+    try {
+      const data = await fetchJsonOrThrow<any>("/api/admin/email-accounts");
+      setAccounts(Array.isArray(data) ? data : []);
+    } finally {
+      setAccountsLoading(false);
+    }
   }
 
   useEffect(() => {
