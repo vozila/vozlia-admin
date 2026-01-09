@@ -310,9 +310,9 @@ export default function AdminPage() {
   ]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("tpl-1");
 
-// Agent Memory (concept UI; wiring next)
+// Agent Memory (wired)
 const [memoryEngagementPrompt, setMemoryEngagementPrompt] = useState<string>("");
-const [memorySearch, setMemorySearch] = useState<string>("");
+
 
 // Chit-Chat (concept)
 const [chitchatDelaySec, setChitchatDelaySec] = useState<string>("2.0");
@@ -1012,7 +1012,8 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 
           <SectionRow
   title="Agent Memory"
-  subtitle="Short-term + long-term toggles and engagement phrases (wired). Memory Bank table still concept."
+  subtitle="Short-term + long-term toggles and engagement phrases (wired). Memory Bank is wired via Control Plane for debugging."
+
   open={open.agentMemory}
   onToggle={() => setOpen((p) => ({ ...p, agentMemory: !p.agentMemory }))}
 >
@@ -1055,18 +1056,14 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
   </div>
 
   <div className="panel" style={{ marginTop: 14 }}>
+  <div className="panelTitle">Memory Bank</div>
+  <div className="panelSub">Search and browse long-term memory entries (wired via Control Plane).</div>
 
-    <div className="panelTitle">Memory Bank</div>
-    <div className="panelSub">Search and browse long-term memory entries. (Concept display; API wiring next.)</div>
+  <div style={{ marginTop: 12 }}>
+    <AgentLongTermMemoryTable />
+  </div>
+</div>
 
-    <div style={{ marginTop: 12 }}>
-      <TextField
-        label="Search"
-        value={memorySearch}
-        onChange={setMemorySearch}
-        placeholder="Search memories…"
-      />
-    </div>
 
     <div style={{ marginTop: 12, overflowX: "auto" }}>
       <table className="table">
