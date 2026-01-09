@@ -18,58 +18,34 @@ type ListPayload =
   | {
       items?: MemoryRow[];
       rows?: MemoryRow[];
+      data?: MemoryRow[];
       total?: number;
-      has_more?: boolean;
       next_offset?: number | null;
-      nextOffset?: number | null;
+      offset?: number;
+      limit?: number;
     };
 
+// IMPORTANT: nextOffset is ALWAYS present (number|null), never undefined.
 function normalizeList(payload: ListPayload): { rows: MemoryRow[]; total?: number; nextOffset: number | null } {
-  if (Array.isArray(payload)) {
-    return { rows: payload, nextOffset: null };
-  }
+  if (Array.isArray(payload)) return { rows: payload, nextOffset: null };
 
-  if (payload && typeof payload === "object") {
-    const anyPayload = payload as any;
-    const rows: MemoryRow[] = Array.isArray(anyPayload.items)
-      ? anyPayload.items
-      : Array.isArray(anyPayload.rows)
-        ? anyPayload.rows
-        : [];
+  const anyPayload = payload as any;
+  const rows =
+    (Array.isArray(anyPayload?.items) && anyPayload.items) ||
+    (Array.isArray(anyPayload?.rows) && anyPayload.rows) ||
+    (Array.isArray(anyPayload?.data) && anyPayload.data) ||
+    [];
 
-    const total: number | undefined = typeof anyPayload.total === "number" ? anyPayload.total : undefined;
+  const total = typeof anyPayload?.total === "number" ? anyPayload.total : undefined;
+  const nextOffset = typeof anyPayload?.next_offset === "number" ? anyPayload.next_offset : null;
 
-    const nextOffset =
-      typeof anyPayload.next_offset === "number"
-        ? anyPayload.next_offset
-        : typeof anyPayload.nextOffset === "number"
-          ? anyPayload.nextOffset
-          : null;
-
-    return { rows, total, nextOffset };
-  }
-
-  return { rows: [], nextOffset: null };
-}
-
-function formatCreated(ts?: string): string {
-  if (!ts) return "—";
-  const s = String(ts);
-
-  // If the API returns an ISO timestamp *without* a timezone (e.g. 2026-01-08T01:56:05),
-  // browsers will treat it as LOCAL time. Our DB/app timestamps are UTC, so we force UTC
-  // by appending "Z" when no offset is present.
-  const isoNoTz = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s);
-  const d = new Date(isoNoTz ? `${s}Z` : s);
-  if (Number.isNaN(d.getTime())) return s;
-  return d.toLocaleString();
+  return { rows, total, nextOffset };
 }
 
 async function fetchJsonOrThrow<T = any>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   const text = await res.text();
 
-  // Try to parse JSON if possible (some upstream errors return plain text)
   let data: any = null;
   if (text) {
     try {
@@ -80,7 +56,10 @@ async function fetchJsonOrThrow<T = any>(url: string, init?: RequestInit): Promi
   }
 
   if (!res.ok) {
-    const msg = data?.error || data?.detail || data?.message || text || "Request failed";
+    const msg =
+      (data && (data.error || data.detail || data.message)) ||
+      (text ? text.slice(0, 800) : res.statusText) ||
+      `HTTP ${res.status}`;
     throw new Error(`${url} failed (${res.status}): ${typeof msg === "string" ? msg : JSON.stringify(msg)}`);
   }
 
@@ -93,17 +72,92 @@ async function fetchJsonOrThrow<T = any>(url: string, init?: RequestInit): Promi
   return data as T;
 }
 
+function formatEST(input?: string): string {
+  if (!input) return "—";
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return input;
+
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+      timeZoneName: "short",
+    }).format(d);
+  } catch {
+    // If the runtime doesn't support timeZone (rare), fall back to local.
+    return d.toLocaleString();
+  }
+}
+
+function csvEscape(v: any): string {
+  if (v === null || v === undefined) return "";
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  // If it contains quotes, commas, or newlines, quote it per RFC 4180.
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function rowsToCsv(rows: MemoryRow[]): string {
+  const headers = [
+    "created_at_est",
+    "created_at_raw",
+    "tenant_id",
+    "caller_id",
+    "call_sid",
+    "skill_key",
+    "kind",
+    "text",
+    "id",
+    "tags_json",
+    "data_json",
+  ];
+
+  const lines: string[] = [];
+  lines.push(headers.join(","));
+
+  for (const r of rows) {
+    const createdRaw = r.created_at || "";
+    const createdEst = formatEST(r.created_at);
+
+    const line = [
+      csvEscape(createdEst),
+      csvEscape(createdRaw),
+      csvEscape(r.tenant_id || ""),
+      csvEscape(r.caller_id || ""),
+      csvEscape(r.call_sid || ""),
+      csvEscape(r.skill_key || ""),
+      csvEscape(r.kind || ""),
+      csvEscape(r.text || ""),
+      csvEscape(r.id),
+      csvEscape(r.tags_json),
+      csvEscape(r.data_json),
+    ].join(",");
+    lines.push(line);
+  }
+
+  // Add UTF-8 BOM for Excel compatibility.
+  return "\uFEFF" + lines.join("\n");
+}
+
+function downloadTextFile(text: string, filename: string, mime = "text/plain;charset=utf-8") {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2500);
+}
+
 export default function AgentLongTermMemoryTable() {
   const [q, setQ] = useState("");
-  const qTrim = useMemo(() => q.trim(), [q]);
-
-  // Real debounce so we don't spam the API on every keystroke.
-  const [qDebounced, setQDebounced] = useState<string>("");
-  useEffect(() => {
-    const t = setTimeout(() => setQDebounced(qTrim), 250);
-    return () => clearTimeout(t);
-  }, [qTrim]);
-
   const [limit, setLimit] = useState(50);
   const [offset, setOffset] = useState(0);
 
@@ -111,30 +165,47 @@ export default function AgentLongTermMemoryTable() {
   const [total, setTotal] = useState<number | undefined>(undefined);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
 
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
   const [loading, setLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkStatus, setBulkStatus] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
+
   const [error, setError] = useState<string | null>(null);
 
-  // Reset to first page when the debounced search changes
-  useEffect(() => {
-    setOffset(0);
-  }, [qDebounced, limit]);
+  // Debounce search so we don't spam the API.
+  const debouncedQ = useMemo(() => q.trim(), [q]);
 
-  async function load(currentOffset: number) {
+  const pageIds = useMemo(() => rows.map((r) => r.id), [rows]);
+  const allSelectedOnPage = useMemo(
+    () => pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id)),
+    [pageIds, selectedIds]
+  );
+
+  // Clear selections when paging/filtering changes (selection is page-scoped).
+  useEffect(() => {
+    setSelectedIds(new Set());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offset, limit, debouncedQ]);
+
+  async function load() {
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
-      params.set("offset", String(currentOffset));
-      if (qDebounced) params.set("q", qDebounced);
+      params.set("offset", String(offset));
+      if (debouncedQ) params.set("q", debouncedQ);
 
       const payload = await fetchJsonOrThrow<ListPayload>(`/api/admin/memory/longterm?${params.toString()}`);
       const norm = normalizeList(payload);
 
       setRows(norm.rows);
       setTotal(norm.total);
-      setNextOffset(norm.nextOffset ?? null);
+      setNextOffset(norm.nextOffset);
     } catch (e: any) {
       setError(e?.message || String(e));
       setRows([]);
@@ -145,29 +216,143 @@ export default function AgentLongTermMemoryTable() {
     }
   }
 
-  // Load whenever pagination/search changes
   useEffect(() => {
-    load(offset);
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offset, limit, qDebounced]);
+  }, [offset, limit, debouncedQ]);
 
   async function onDelete(id: string) {
-    if (!id) return;
-    if (!confirm("Delete this memory row permanently?")) return;
+    const ok = window.confirm("Delete this long-term memory row? This cannot be undone.");
+    if (!ok) return;
 
     setDeletingId(id);
     setError(null);
     try {
       await fetchJsonOrThrow(`/api/admin/memory/longterm/${encodeURIComponent(id)}`, { method: "DELETE" });
-      // reload current page (but if this page becomes empty, step back one page)
-      const nextOff = offset > 0 && rows.length === 1 ? Math.max(0, offset - limit) : offset;
-      if (nextOff !== offset) setOffset(nextOff);
-      else await load(nextOff);
+      // If it was selected, remove it from selection
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      await load();
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
       setDeletingId(null);
     }
+  }
+
+  async function onBulkDeleteSelected() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+
+    const ok = window.confirm(`Delete ${ids.length} long-term memory row(s)? This cannot be undone.`);
+    if (!ok) return;
+
+    setBulkDeleting(true);
+    setBulkStatus(null);
+    setError(null);
+
+    try {
+      // To keep this deployment safe, we use the existing per-row DELETE endpoint.
+      // (Optional server-side bulk delete can be added later, and the UI can switch to it.)
+      const BATCH = 5;
+      for (let i = 0; i < ids.length; i += BATCH) {
+        const batch = ids.slice(i, i + BATCH);
+        setBulkStatus(`Deleting ${Math.min(i + batch.length, ids.length)} / ${ids.length}…`);
+        await Promise.all(
+          batch.map((id) => fetchJsonOrThrow(`/api/admin/memory/longterm/${encodeURIComponent(id)}`, { method: "DELETE" }))
+        );
+      }
+
+      setSelectedIds(new Set());
+      setBulkStatus(`Deleted ${ids.length} row(s).`);
+      await load();
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setBulkDeleting(false);
+      setTimeout(() => setBulkStatus(null), 2500);
+    }
+  }
+
+  async function onExportCsv() {
+    setExporting(true);
+    setExportStatus(null);
+    setError(null);
+
+    try {
+      let exportRows: MemoryRow[] = [];
+
+      const selected = Array.from(selectedIds);
+      if (selected.length > 0) {
+        exportRows = rows.filter((r) => selectedIds.has(r.id));
+      } else {
+        // Export *matching* rows (up to a safe cap) by paging through the existing API.
+        const MAX_EXPORT_ROWS = 5000;
+        const PAGE = 200;
+
+        let off = 0;
+        while (exportRows.length < MAX_EXPORT_ROWS) {
+          const remaining = MAX_EXPORT_ROWS - exportRows.length;
+          const take = Math.min(PAGE, remaining);
+
+          const params = new URLSearchParams();
+          params.set("limit", String(take));
+          params.set("offset", String(off));
+          if (debouncedQ) params.set("q", debouncedQ);
+
+          setExportStatus(`Fetching ${exportRows.length}…`);
+          const payload = await fetchJsonOrThrow<ListPayload>(`/api/admin/memory/longterm?${params.toString()}`);
+          const norm = normalizeList(payload);
+
+          if (!norm.rows.length) break;
+          exportRows.push(...norm.rows);
+
+          // Prefer server-provided nextOffset; otherwise stop to avoid loops.
+          if (norm.nextOffset === null) break;
+          off = norm.nextOffset;
+
+          if (norm.rows.length < take) break;
+        }
+      }
+
+      const csv = rowsToCsv(exportRows);
+      const dateTag = new Date().toISOString().slice(0, 10);
+      const fileName =
+        selectedIds.size > 0
+          ? `vozlia_longterm_memory_selected_${dateTag}.csv`
+          : `vozlia_longterm_memory_export_${dateTag}.csv`;
+
+      downloadTextFile(csv, fileName, "text/csv;charset=utf-8");
+      setExportStatus(`Exported ${exportRows.length} row(s).`);
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setExporting(false);
+      setTimeout(() => setExportStatus(null), 2500);
+    }
+  }
+
+  function toggleRow(id: string, checked: boolean) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  function toggleAllOnPage(checked: boolean) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of pageIds) {
+        if (checked) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
   }
 
   return (
@@ -182,31 +367,13 @@ export default function AgentLongTermMemoryTable() {
       <div className="form" style={{ marginTop: 12 }}>
         <div className="field">
           <div className="fieldLabel">Search</div>
-          <div className="fieldHelper">Server-side substring search across text/meta (debug).</div>
+          <div className="fieldHelper">Searches across row fields (server-side if supported).</div>
           <input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search memories…" />
         </div>
 
-        <div className="actions" style={{ alignItems: "center" }}>
-          <div className="muted">
-            {loading ? "Loading…" : qDebounced ? `Searching: “${qDebounced}”` : "Latest rows"}
-            {typeof total === "number" ? ` · Total: ${total}` : rows.length ? ` · Showing: ${rows.length}` : ""}
-          </div>
-
-          <div style={{ flex: 1 }} />
-
-          <label className="muted" style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            Limit
-            <select className="input" style={{ width: 120 }} value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
-              {[25, 50, 100, 200, 500].map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <button type="button" className="btnSecondary" onClick={() => load(offset)} disabled={loading}>
-            Refresh
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <button type="button" className="btnSecondary" onClick={() => load()} disabled={loading}>
+            {loading ? "Refreshing…" : "Refresh"}
           </button>
 
           <button
@@ -214,12 +381,57 @@ export default function AgentLongTermMemoryTable() {
             className="btnSecondary"
             onClick={() => {
               setQ("");
-              setQDebounced("");
+              setOffset(0);
             }}
-            disabled={loading && !qDebounced}
+            disabled={loading || (!q && offset === 0)}
           >
-            Clear Search
+            Clear
           </button>
+
+          <button
+            type="button"
+            className="btnSecondary"
+            onClick={onExportCsv}
+            disabled={loading || exporting || rows.length === 0}
+            title={selectedIds.size > 0 ? "Exports selected rows on this page" : "Exports up to 5000 matching rows"}
+          >
+            {exporting ? "Exporting…" : "Export CSV"}
+          </button>
+
+          <button
+            type="button"
+            className="btnSecondary"
+            onClick={onBulkDeleteSelected}
+            disabled={loading || bulkDeleting || selectedIds.size === 0}
+            title="Deletes selected rows on this page"
+          >
+            {bulkDeleting ? "Deleting…" : `Delete Selected (${selectedIds.size})`}
+          </button>
+
+          <div className="field" style={{ margin: 0, minWidth: 140 }}>
+            <div className="fieldLabel">Rows</div>
+            <select
+              className="select"
+              value={limit}
+              onChange={(e) => {
+                setLimit(Number(e.target.value));
+                setOffset(0);
+              }}
+              disabled={loading}
+            >
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={200}>200</option>
+            </select>
+          </div>
+
+          <div className="muted" style={{ paddingTop: 18 }}>
+            {typeof total === "number" ? `Total: ${total}` : rows.length ? `Showing: ${rows.length}` : null}
+            {selectedIds.size ? ` · Selected: ${selectedIds.size}` : null}
+            {exportStatus ? ` · ${exportStatus}` : null}
+            {bulkStatus ? ` · ${bulkStatus}` : null}
+          </div>
         </div>
       </div>
 
@@ -227,7 +439,16 @@ export default function AgentLongTermMemoryTable() {
         <table className="table">
           <thead>
             <tr>
-              <th style={{ minWidth: 180 }}>Created (local)</th>
+              <th style={{ width: 44 }}>
+                <input
+                  type="checkbox"
+                  checked={allSelectedOnPage}
+                  onChange={(e) => toggleAllOnPage(e.target.checked)}
+                  disabled={rows.length === 0}
+                  aria-label="Select all rows on this page"
+                />
+              </th>
+              <th style={{ minWidth: 180 }}>Created (EST)</th>
               <th style={{ minWidth: 220 }}>Tenant / Caller</th>
               <th style={{ minWidth: 140 }}>Skill / Kind</th>
               <th style={{ minWidth: 520 }}>Text</th>
@@ -238,43 +459,54 @@ export default function AgentLongTermMemoryTable() {
           <tbody>
             {loading && rows.length === 0 ? (
               <tr>
-                <td colSpan={5} className="muted" style={{ padding: 12 }}>
+                <td colSpan={6} className="muted" style={{ padding: 12 }}>
                   Loading…
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={5} className="muted" style={{ padding: 12 }}>
+                <td colSpan={6} className="muted" style={{ padding: 12 }}>
                   No memory rows found.
                 </td>
               </tr>
             ) : (
               rows.map((r) => (
                 <tr key={r.id}>
-                  <td className="mono">{r.created_at ? new Date(r.created_at).toLocaleString() : "—"}</td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(r.id)}
+                      onChange={(e) => toggleRow(r.id, e.target.checked)}
+                      aria-label={`Select row ${r.id}`}
+                    />
+                  </td>
+
+                  <td title={r.created_at || ""}>{formatEST(r.created_at)}</td>
 
                   <td>
-                    <div className="mono" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 280 }}>
+                    <div className="mono" style={{ whiteSpace: "nowrap" }}>
                       {r.tenant_id || "—"}
                     </div>
-                    <div className="mono" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 280, marginTop: 6 }}>
+                    <div className="mono" style={{ whiteSpace: "nowrap", marginTop: 4 }}>
                       {r.caller_id || "—"}
                     </div>
                     {r.call_sid ? (
-                      <div className="mono muted" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 280, marginTop: 6 }}>
-                        {r.call_sid}
+                      <div className="muted mono" style={{ marginTop: 4 }}>
+                        SID: {r.call_sid}
                       </div>
                     ) : null}
                   </td>
 
                   <td>
-                    <div className="mono">{r.skill_key || "—"}</div>
-                    <div className="muted" style={{ marginTop: 6 }}>
+                    <div className="mono" style={{ whiteSpace: "nowrap" }}>
+                      {r.skill_key || "—"}
+                    </div>
+                    <div className="muted" style={{ marginTop: 4 }}>
                       {r.kind || "—"}
                     </div>
                   </td>
 
-                  {/* no truncation — wrap and show full text */}
+                  {/* FIX: no truncation — wrap and show full text */}
                   <td style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word" }}>
                     {r.text || "—"}
                     {r.tags_json || r.data_json ? (
@@ -290,7 +522,12 @@ export default function AgentLongTermMemoryTable() {
                   </td>
 
                   <td>
-                    <button type="button" className="btnSecondary" onClick={() => onDelete(r.id)} disabled={deletingId === r.id}>
+                    <button
+                      type="button"
+                      className="btnSecondary"
+                      onClick={() => onDelete(r.id)}
+                      disabled={deletingId === r.id || bulkDeleting}
+                    >
                       {deletingId === r.id ? "Deleting…" : "Delete"}
                     </button>
                     <div className="muted mono" style={{ marginTop: 6 }}>
@@ -304,16 +541,21 @@ export default function AgentLongTermMemoryTable() {
         </table>
       </div>
 
-      <div className="actions" style={{ marginTop: 12, justifyContent: "space-between", alignItems: "center" }}>
-        <button type="button" className="btnSecondary" onClick={() => setOffset((o) => Math.max(0, o - limit))} disabled={loading || offset === 0}>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12, alignItems: "center" }}>
+        <button
+          type="button"
+          className="btnSecondary"
+          onClick={() => setOffset((o) => Math.max(0, o - limit))}
+          disabled={loading || offset === 0}
+        >
           Prev
         </button>
 
         <button
           type="button"
           className="btnSecondary"
-          onClick={() => nextOffset !== null && setOffset(nextOffset)}
-          disabled={loading || nextOffset === null}
+          onClick={() => setOffset((o) => o + limit)}
+          disabled={loading || (rows.length < limit && nextOffset === null)}
         >
           Next
         </button>
