@@ -25,7 +25,6 @@ type ListPayload =
       limit?: number;
     };
 
-// IMPORTANT: nextOffset is ALWAYS present (number|null), never undefined.
 function normalizeList(payload: ListPayload): { rows: MemoryRow[]; total?: number; nextOffset: number | null } {
   if (Array.isArray(payload)) return { rows: payload, nextOffset: null };
 
@@ -44,6 +43,8 @@ function normalizeList(payload: ListPayload): { rows: MemoryRow[]; total?: numbe
 
 async function fetchJsonOrThrow<T = any>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
+
+  // Always read as text first so we can handle "Internal Server Error" bodies safely.
   const text = await res.text();
 
   let data: any = null;
@@ -55,18 +56,19 @@ async function fetchJsonOrThrow<T = any>(url: string, init?: RequestInit): Promi
     }
   }
 
+  // If upstream returned an error, surface a useful message.
   if (!res.ok) {
     const msg =
       (data && (data.error || data.detail || data.message)) ||
-      (text ? text.slice(0, 800) : res.statusText) ||
+      (text ? text.slice(0, 500) : res.statusText) ||
       `HTTP ${res.status}`;
+
     throw new Error(`${url} failed (${res.status}): ${typeof msg === "string" ? msg : JSON.stringify(msg)}`);
   }
 
+  // Success responses should be JSON for these endpoints.
   if (data === null) {
-    // some successful endpoints might return empty body; treat as empty object
-    if (!text) return {} as T;
-    throw new Error(`${url} returned non-JSON (HTTP ${res.status}). First bytes:\n${text.slice(0, 800)}`);
+    throw new Error(`${url} returned non-JSON (HTTP ${res.status}). First bytes:\n${text.slice(0, 500)}`);
   }
 
   return data as T;
@@ -102,7 +104,7 @@ export default function AgentLongTermMemoryTable() {
 
       setRows(norm.rows);
       setTotal(norm.total);
-      setNextOffset(norm.nextOffset);
+      setNextOffset(norm.nextOffset ?? null); // <- build-safe (never undefined)
     } catch (e: any) {
       setError(e?.message || String(e));
       setRows([]);
@@ -119,15 +121,15 @@ export default function AgentLongTermMemoryTable() {
       setOffset(0);
     }, 250);
     return () => clearTimeout(t);
-  }, [debouncedQ, limit]);
+  }, [debouncedQ]);
 
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offset, limit, debouncedQ]);
+  }, [debouncedQ, limit, offset]);
 
   async function onDelete(id: string) {
-    const ok = window.confirm("Delete this long-term memory row? This cannot be undone.");
+    const ok = confirm("Delete this memory row permanently? This cannot be undone.");
     if (!ok) return;
 
     setDeletingId(id);
@@ -143,95 +145,77 @@ export default function AgentLongTermMemoryTable() {
   }
 
   return (
-    <div>
+    <div className="panel" style={{ marginTop: 12 }}>
+      <div className="panelTitle">Agent Long-Term Memory (Debug)</div>
+      <div className="panelSub">
+        Backed by the persistent <span className="mono">caller_memory_events</span> table via the Control Plane API.
+      </div>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12, alignItems: "center" }}>
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search text / caller / skill / call sid…"
+          className="input"
+          style={{ minWidth: 260, flex: "1 1 260px" }}
+        />
+
+        <label className="muted" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          Limit
+          <select className="input" value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
+            {[25, 50, 100, 200].map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <button type="button" className="btnSecondary" onClick={() => load()} disabled={loading}>
+          {loading ? "Loading…" : "Refresh"}
+        </button>
+      </div>
+
       {error ? (
-        <div className="alert" style={{ marginTop: 12 }}>
-          <div className="alertTitle">Memory Bank Error</div>
-          <div className="alertBody">{error}</div>
+        <div className="panel" style={{ marginTop: 12, borderColor: "rgba(239,68,68,0.35)" }}>
+          <div className="panelTitle" style={{ color: "#b91c1c" }}>
+            Error
+          </div>
+          <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{error}</pre>
         </div>
       ) : null}
-
-      <div className="form" style={{ marginTop: 12 }}>
-        <div className="field">
-          <div className="fieldLabel">Search</div>
-          <div className="fieldHelper">Searches across row fields (server-side if supported).</div>
-          <input
-            className="input"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search memories…"
-          />
-        </div>
-
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <button type="button" className="btnSecondary" onClick={() => load()} disabled={loading}>
-            {loading ? "Refreshing…" : "Refresh"}
-          </button>
-
-          <button
-            type="button"
-            className="btnSecondary"
-            onClick={() => {
-              setQ("");
-              setOffset(0);
-            }}
-            disabled={loading || (!q && offset === 0)}
-          >
-            Clear
-          </button>
-
-          <div className="field" style={{ margin: 0, minWidth: 140 }}>
-            <div className="fieldLabel">Rows</div>
-            <select
-              className="input"
-              value={limit}
-              onChange={(e) => setLimit(Number(e.target.value))}
-              disabled={loading}
-            >
-              <option value={25}>25</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-              <option value={200}>200</option>
-            </select>
-          </div>
-
-          <div className="muted" style={{ paddingTop: 18 }}>
-            {typeof total === "number" ? `Total: ${total}` : rows.length ? `Showing: ${rows.length}` : null}
-          </div>
-        </div>
-      </div>
 
       <div style={{ marginTop: 12, overflowX: "auto" }}>
         <table className="table">
           <thead>
             <tr>
-              <th style={{ minWidth: 160 }}>Created</th>
+              <th style={{ minWidth: 120 }}>Created</th>
               <th style={{ minWidth: 220 }}>Tenant / Caller</th>
               <th style={{ minWidth: 140 }}>Skill / Kind</th>
-              <th style={{ minWidth: 520 }}>Text</th>
-              <th style={{ minWidth: 140 }}>Actions</th>
+              <th style={{ minWidth: 420 }}>Text</th>
+              <th style={{ minWidth: 180 }}>Actions</th>
             </tr>
           </thead>
 
           <tbody>
-            {loading && rows.length === 0 ? (
+            {loading ? (
               <tr>
-                <td colSpan={5} className="muted" style={{ padding: 12 }}>
+                <td colSpan={5} className="muted">
                   Loading…
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={5} className="muted" style={{ padding: 12 }}>
+                <td colSpan={5} className="muted">
                   No memory rows found.
                 </td>
               </tr>
             ) : (
               rows.map((r) => (
                 <tr key={r.id}>
-                  <td>{r.created_at || "—"}</td>
+                  <td className="muted">{r.created_at ? new Date(r.created_at).toLocaleString() : "—"}</td>
 
-                  <td>
+                  <td style={{ minWidth: 0 }}>
                     <div className="mono" style={{ whiteSpace: "nowrap" }}>
                       {r.tenant_id || "—"}
                     </div>
@@ -254,7 +238,7 @@ export default function AgentLongTermMemoryTable() {
                     </div>
                   </td>
 
-                  {/* no truncation — wrap and show full text */}
+                  {/* No truncation: wrap and show full text */}
                   <td style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word" }}>
                     {r.text || "—"}
                     {r.tags_json || r.data_json ? (
@@ -290,12 +274,7 @@ export default function AgentLongTermMemoryTable() {
       </div>
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12, alignItems: "center" }}>
-        <button
-          type="button"
-          className="btnSecondary"
-          onClick={() => setOffset((o) => Math.max(0, o - limit))}
-          disabled={loading || offset === 0}
-        >
+        <button type="button" className="btnSecondary" onClick={() => setOffset((o) => Math.max(0, o - limit))} disabled={loading || offset === 0}>
           Prev
         </button>
 
@@ -308,7 +287,10 @@ export default function AgentLongTermMemoryTable() {
           Next
         </button>
 
-        <div className="muted">Offset: {offset}</div>
+        <div className="muted">
+          Offset: {offset}
+          {typeof total === "number" ? ` · Total: ${total}` : ""}
+        </div>
       </div>
     </div>
   );
