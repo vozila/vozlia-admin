@@ -288,7 +288,12 @@ export default function AgentLongTermMemoryTable() {
           Prev
         </button>
 
-        <button type="button" className="btnSecondary" onClick={() => canNext && setOffset(nextOffset!)} disabled={loading || !canNext}>
+        <button
+          type="button"
+          className="btnSecondary"
+          onClick={() => canNext && setOffset(nextOffset!)}
+          disabled={loading || !canNext}
+        >
           Next
         </button>
 
