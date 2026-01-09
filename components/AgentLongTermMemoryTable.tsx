@@ -25,8 +25,9 @@ type ListPayload =
       limit?: number;
     };
 
-function normalizeList(payload: ListPayload): { rows: MemoryRow[]; total?: number; nextOffset?: number | null } {
-  if (Array.isArray(payload)) return { rows: payload };
+// IMPORTANT: nextOffset is ALWAYS present (number|null), never undefined.
+function normalizeList(payload: ListPayload): { rows: MemoryRow[]; total?: number; nextOffset: number | null } {
+  if (Array.isArray(payload)) return { rows: payload, nextOffset: null };
 
   const anyPayload = payload as any;
   const rows =
@@ -98,6 +99,7 @@ export default function AgentLongTermMemoryTable() {
 
       const payload = await fetchJsonOrThrow<ListPayload>(`/api/admin/memory/longterm?${params.toString()}`);
       const norm = normalizeList(payload);
+
       setRows(norm.rows);
       setTotal(norm.total);
       setNextOffset(norm.nextOffset);
@@ -230,22 +232,36 @@ export default function AgentLongTermMemoryTable() {
                   <td>{r.created_at || "—"}</td>
 
                   <td>
-                    <div className="mono" style={{ whiteSpace: "nowrap" }}>{r.tenant_id || "—"}</div>
-                    <div className="mono" style={{ whiteSpace: "nowrap", marginTop: 4 }}>{r.caller_id || "—"}</div>
-                    {r.call_sid ? <div className="muted mono" style={{ marginTop: 4 }}>{r.call_sid}</div> : null}
+                    <div className="mono" style={{ whiteSpace: "nowrap" }}>
+                      {r.tenant_id || "—"}
+                    </div>
+                    <div className="mono" style={{ whiteSpace: "nowrap", marginTop: 4 }}>
+                      {r.caller_id || "—"}
+                    </div>
+                    {r.call_sid ? (
+                      <div className="muted mono" style={{ marginTop: 4 }}>
+                        {r.call_sid}
+                      </div>
+                    ) : null}
                   </td>
 
                   <td>
-                    <div className="mono" style={{ whiteSpace: "nowrap" }}>{r.skill_key || "—"}</div>
-                    <div className="muted" style={{ marginTop: 4 }}>{r.kind || "—"}</div>
+                    <div className="mono" style={{ whiteSpace: "nowrap" }}>
+                      {r.skill_key || "—"}
+                    </div>
+                    <div className="muted" style={{ marginTop: 4 }}>
+                      {r.kind || "—"}
+                    </div>
                   </td>
 
-                  {/* FIX: no truncation — wrap and show full text */}
+                  {/* no truncation — wrap and show full text */}
                   <td style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word" }}>
                     {r.text || "—"}
-                    {(r.tags_json || r.data_json) ? (
+                    {r.tags_json || r.data_json ? (
                       <details style={{ marginTop: 8 }}>
-                        <summary className="muted" style={{ cursor: "pointer" }}>meta</summary>
+                        <summary className="muted" style={{ cursor: "pointer" }}>
+                          meta
+                        </summary>
                         <pre style={{ marginTop: 8, fontSize: 12, whiteSpace: "pre-wrap" }}>
                           {JSON.stringify({ tags_json: r.tags_json, data_json: r.data_json }, null, 2)}
                         </pre>
@@ -262,7 +278,9 @@ export default function AgentLongTermMemoryTable() {
                     >
                       {deletingId === r.id ? "Deleting…" : "Delete"}
                     </button>
-                    <div className="muted mono" style={{ marginTop: 6 }}>{r.id}</div>
+                    <div className="muted mono" style={{ marginTop: 6 }}>
+                      {r.id}
+                    </div>
                   </td>
                 </tr>
               ))
