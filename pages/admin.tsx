@@ -327,51 +327,17 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
   OBS_LOG_JSON: false,
 });
 
-  async function fetchJsonOrThrow<T = any>(url: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(url, init);
-
-    // Always read as text first so we can handle "Internal Server Error" bodies safely.
-    const text = await res.text();
-
-    let data: any = null;
-    if (text) {
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = null;
-      }
-    }
-
-    // If upstream returned an error, surface a useful message.
-    if (!res.ok) {
-      const msg =
-        (data && (data.error || data.detail || data.message)) ||
-        (text ? text.slice(0, 500) : res.statusText) ||
-        `HTTP ${res.status}`;
-
-      throw new Error(`${url} failed (${res.status}): ${typeof msg === "string" ? msg : JSON.stringify(msg)}`);
-    }
-
-    // Success responses should be JSON for these endpoints.
-    if (data === null) {
-      throw new Error(
-        `${url} returned non-JSON (HTTP ${res.status}). First bytes:\n${text.slice(0, 500)}`
-      );
-    }
-
-    return data as T;
-  }
-  
-
   // Wired loading
   async function loadSettings() {
-    const data = await fetchJsonOrThrow<any>("/api/admin/settings");
+    const res = await fetch("/api/admin/settings");
+    const data = await res.json();
 
     // Defensive defaults so older control-plane deployments don't break UI
-    const skills =
-      (data && typeof data === "object" && data.skills_config && typeof data.skills_config === "object")
-        ? data.skills_config
-        : {};
+    const skills = (data && typeof data === "object" && data.skills_config && typeof data.skills_config === "object")
+      ? data.skills_config
+      : {};
+
+    const gmailSkill = (skills as any).gmail_summary || {};
 
     // Greeting priority order (skill IDs from control plane)
     const prio = Array.isArray((data as any).skills_priority_order) ? ((data as any).skills_priority_order as string[]) : [];
@@ -425,7 +391,6 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
       }
       return next;
     });
-
     // Wire memory engagement phrases (one per line in UI)
     setMemoryEngagementPrompt(Array.isArray(data.memory_engagement_phrases) ? data.memory_engagement_phrases.join("\n") : "");
   }
@@ -433,12 +398,10 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 
   async function loadAccounts() {
     setAccountsLoading(true);
-    try {
-      const data = await fetchJsonOrThrow<any>("/api/admin/email-accounts");
-      setAccounts(Array.isArray(data) ? data : []);
-    } finally {
-      setAccountsLoading(false);
-    }
+    const res = await fetch("/api/admin/email-accounts");
+    const data = await res.json();
+    setAccounts(Array.isArray(data) ? data : []);
+    setAccountsLoading(false);
   }
 
   useEffect(() => {
@@ -526,11 +489,14 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
     };
 
     try {
-      const data = await fetchJsonOrThrow<any>("/api/admin/settings", {
+      const res = await fetch("/api/admin/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to save settings");
 
       setSettings(data);
 
@@ -565,11 +531,13 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
   async function patchAccount(id: string, patch: Partial<EmailAccount>) {
     setError(null);
     try {
-      await fetchJsonOrThrow(`/api/admin/email-accounts/${encodeURIComponent(id)}`, {
+      const res = await fetch(`/api/admin/email-accounts/${encodeURIComponent(id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),
       });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to update email account");
       await loadAccounts();
     } catch (e: any) {
       setError(e?.message || String(e));
@@ -1042,58 +1010,64 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
             </div>
           </SectionRow>
 
-            <SectionRow
-            title="Agent Memory"
-            subtitle="Short-term + long-term toggles and engagement phrases (wired). Memory Bank is wired via Control Plane for debugging."
-            open={open.agentMemory}
-            onToggle={() => setOpen((p) => ({ ...p, agentMemory: !p.agentMemory }))}
-          >
-            <div className="panel">
-              <div className="panelTitle">Memory</div>
-              <div className="panelSub">These controls are wired to the control plane. Save to apply them at runtime.</div>
+          <SectionRow
+  title="Agent Memory"
+  subtitle="Short-term + long-term toggles and engagement phrases (wired). Memory Bank is wired via Control Plane for debugging."
 
-              <div className="form" style={{ marginTop: 12 }}>
-                <Switch
-                  checked={!!settings.shortterm_memory_enabled}
-                  onChange={(v) => setSettings((p: any) => ({ ...p, shortterm_memory_enabled: v }))}
-                  label="Enable Short-Term Memory"
-                  helper="Wired: stored in control-plane settings."
-                />
+  open={open.agentMemory}
+  onToggle={() => setOpen((p) => ({ ...p, agentMemory: !p.agentMemory }))}
+>
+  <div className="panel">
+    <div className="panelTitle">Memory</div>
+    <div className="panelSub">
+      These controls are wired to the control plane. Save to apply them at runtime.
+    </div>
 
-                <Switch
-                  checked={!!settings.longterm_memory_enabled}
-                  onChange={(v) => setSettings((p: any) => ({ ...p, longterm_memory_enabled: v }))}
-                  label="Enable Long-Term Memory"
-                  helper="Wired: stored in control-plane settings."
-                />
+    <div className="form" style={{ marginTop: 12 }}>
+      <Switch
+        checked={!!settings.shortterm_memory_enabled}
+        onChange={(v) => setSettings((p: any) => ({ ...p, shortterm_memory_enabled: v }))}
+        label="Enable Short-Term Memory"
+        helper="Wired: stored in control-plane settings."
+      />
 
-                <TextField
-                  label="Engagement Prompt (phrases)"
-                  value={memoryEngagementPrompt}
-                  onChange={setMemoryEngagementPrompt}
-                  placeholder={"One phrase per line, e.g.\nremember this\nstore that in memory"}
-                  helper="Wired: phrases that will trigger the FSM/router to consult memory."
-                  multiline
-                />
-              </div>
+      <Switch
+        checked={!!settings.longterm_memory_enabled}
+        onChange={(v) => setSettings((p: any) => ({ ...p, longterm_memory_enabled: v }))}
+        label="Enable Long-Term Memory"
+        helper="Wired: stored in control-plane settings."
+      />
 
-              <div className="actions" style={{ marginTop: 12 }}>
-                <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
-                  {saving ? "Saving…" : "Save Memory Settings"}
-                </button>
-              </div>
-            </div>
+      <TextField
+        label="Engagement Prompt (phrases)"
+        value={memoryEngagementPrompt}
+        onChange={setMemoryEngagementPrompt}
+        placeholder={"One phrase per line, e.g.\nremember this\nstore that in memory"}
+        helper="Wired: phrases that will trigger the FSM/router to consult memory."
+        multiline
+      />
+    </div>
 
-            <div className="panel" style={{ marginTop: 14 }}>
-              <div className="panelTitle">Memory Bank</div>
-              <div className="panelSub">Search and browse long-term memory entries (wired via Control Plane).</div>
+    <div className="actions" style={{ marginTop: 12 }}>
+      <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
+        {saving ? "Saving…" : "Save Memory Settings"}
+      </button>
+    </div>
+  </div>
 
-              <div style={{ marginTop: 12 }}>
-                <AgentLongTermMemoryTable />
-              </div>
-            </div>
-          </SectionRow>
+  <div className="panel" style={{ marginTop: 14 }}>
+  <div className="panelTitle">Memory Bank</div>
+  <div className="panelSub">Search and browse long-term memory entries (wired via Control Plane).</div>
 
+  <div style={{ marginTop: 12 }}>
+    <AgentLongTermMemoryTable />
+  </div>
+</div>
+
+
+    
+  </div>
+</SectionRow>
 
 <SectionRow
   title="Chit-Chat"
