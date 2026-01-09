@@ -3,7 +3,8 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSession, signIn, signOut } from "next-auth/react";
 import { RenderLogsPanel } from "../components/RenderLogsPanel";
 import { KBUploadPanel } from "../components/KBUploadPanel";
- 
+import AgentLongTermMemoryTable from "../components/AgentLongTermMemoryTable";
+
 type EmailAccount = {
   id: string;
   provider_type: string;
