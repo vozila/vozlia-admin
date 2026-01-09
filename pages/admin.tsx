@@ -1010,103 +1010,58 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
             </div>
           </SectionRow>
 
-          <SectionRow
-  title="Agent Memory"
-  subtitle="Short-term + long-term toggles and engagement phrases (wired). Memory Bank is wired via Control Plane for debugging."
+            <SectionRow
+            title="Agent Memory"
+            subtitle="Short-term + long-term toggles and engagement phrases (wired). Memory Bank is wired via Control Plane for debugging."
+            open={open.agentMemory}
+            onToggle={() => setOpen((p) => ({ ...p, agentMemory: !p.agentMemory }))}
+          >
+            <div className="panel">
+              <div className="panelTitle">Memory</div>
+              <div className="panelSub">These controls are wired to the control plane. Save to apply them at runtime.</div>
 
-  open={open.agentMemory}
-  onToggle={() => setOpen((p) => ({ ...p, agentMemory: !p.agentMemory }))}
->
-  <div className="panel">
-    <div className="panelTitle">Memory</div>
-    <div className="panelSub">
-      These controls are wired to the control plane. Save to apply them at runtime.
-    </div>
+              <div className="form" style={{ marginTop: 12 }}>
+                <Switch
+                  checked={!!settings.shortterm_memory_enabled}
+                  onChange={(v) => setSettings((p: any) => ({ ...p, shortterm_memory_enabled: v }))}
+                  label="Enable Short-Term Memory"
+                  helper="Wired: stored in control-plane settings."
+                />
 
-    <div className="form" style={{ marginTop: 12 }}>
-      <Switch
-        checked={!!settings.shortterm_memory_enabled}
-        onChange={(v) => setSettings((p: any) => ({ ...p, shortterm_memory_enabled: v }))}
-        label="Enable Short-Term Memory"
-        helper="Wired: stored in control-plane settings."
-      />
+                <Switch
+                  checked={!!settings.longterm_memory_enabled}
+                  onChange={(v) => setSettings((p: any) => ({ ...p, longterm_memory_enabled: v }))}
+                  label="Enable Long-Term Memory"
+                  helper="Wired: stored in control-plane settings."
+                />
 
-      <Switch
-        checked={!!settings.longterm_memory_enabled}
-        onChange={(v) => setSettings((p: any) => ({ ...p, longterm_memory_enabled: v }))}
-        label="Enable Long-Term Memory"
-        helper="Wired: stored in control-plane settings."
-      />
+                <TextField
+                  label="Engagement Prompt (phrases)"
+                  value={memoryEngagementPrompt}
+                  onChange={setMemoryEngagementPrompt}
+                  placeholder={"One phrase per line, e.g.\nremember this\nstore that in memory"}
+                  helper="Wired: phrases that will trigger the FSM/router to consult memory."
+                  multiline
+                />
+              </div>
 
-      <TextField
-        label="Engagement Prompt (phrases)"
-        value={memoryEngagementPrompt}
-        onChange={setMemoryEngagementPrompt}
-        placeholder={"One phrase per line, e.g.\nremember this\nstore that in memory"}
-        helper="Wired: phrases that will trigger the FSM/router to consult memory."
-        multiline
-      />
-    </div>
+              <div className="actions" style={{ marginTop: 12 }}>
+                <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
+                  {saving ? "Saving…" : "Save Memory Settings"}
+                </button>
+              </div>
+            </div>
 
-    <div className="actions" style={{ marginTop: 12 }}>
-      <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
-        {saving ? "Saving…" : "Save Memory Settings"}
-      </button>
-    </div>
-  </div>
+            <div className="panel" style={{ marginTop: 14 }}>
+              <div className="panelTitle">Memory Bank</div>
+              <div className="panelSub">Search and browse long-term memory entries (wired via Control Plane).</div>
 
-  <div className="panel" style={{ marginTop: 14 }}>
-  <div className="panelTitle">Memory Bank</div>
-  <div className="panelSub">Search and browse long-term memory entries (wired via Control Plane).</div>
+              <div style={{ marginTop: 12 }}>
+                <AgentLongTermMemoryTable />
+              </div>
+            </div>
+          </SectionRow>
 
-  <div style={{ marginTop: 12 }}>
-    <AgentLongTermMemoryTable />
-  </div>
-</div>
-
-
-    <div style={{ marginTop: 12, overflowX: "auto" }}>
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Created</th>
-            <th>Type</th>
-            <th>Key</th>
-            <th>Value</th>
-            <th>Source</th>
-          </tr>
-        </thead>
-        <tbody>
-          {(() => {
-            const rows: any[] = Array.isArray(settings.memory_bank_preview) ? settings.memory_bank_preview : [];
-            const q = memorySearch.trim().toLowerCase();
-            const filtered = q
-              ? rows.filter((r) => JSON.stringify(r).toLowerCase().includes(q))
-              : rows;
-            if (filtered.length === 0) {
-              return (
-                <tr>
-                  <td colSpan={5} className="muted" style={{ padding: 12 }}>
-                    No entries to display. (This table will populate once the Memory Bank API is wired.)
-                  </td>
-                </tr>
-              );
-            }
-            return filtered.slice(0, 200).map((r, i) => (
-              <tr key={i}>
-                <td>{r.created_at || "—"}</td>
-                <td>{r.type || "—"}</td>
-                <td className="mono">{r.key || "—"}</td>
-                <td>{r.value || "—"}</td>
-                <td className="mono">{r.source || "—"}</td>
-              </tr>
-            ));
-          })()}
-        </tbody>
-      </table>
-    </div>
-  </div>
-</SectionRow>
 
 <SectionRow
   title="Chit-Chat"
