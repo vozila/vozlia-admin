@@ -19,12 +19,6 @@ type KBFileRow = {
 
 type EmailAccount = {
   id: string;
-
-  // IMPORTANT: in current Control Plane this is the owning user's id, and in practice
-  // we treat it as the tenant_id for tenant-scoped operations.
-  user_id?: string | null;
-  userId?: string | null;
-
   provider_type: string;
   oauth_provider?: string | null;
   email_address?: string | null;
@@ -32,9 +26,13 @@ type EmailAccount = {
   is_primary: boolean;
   is_active: boolean;
 
-  // Future-proof: if/when Control Plane returns an explicit tenant_id mapping.
+  // Depending on Control Plane schema, tenant mapping may appear in one of these fields.
   tenant_id?: string | null;
   tenantId?: string | null;
+
+  // Current deployed behavior: email accounts include user_id; in Vozlia today, user_id is the tenant UUID.
+  user_id?: string | null;
+  userId?: string | null;
 };
 
 type ListResp = { items: KBFileRow[]; has_more?: boolean; next_offset?: number | null };
@@ -76,7 +74,7 @@ export function KBUploadPanel() {
 
   const [selectedEmailAccountId, setSelectedEmailAccountId] = useState<string>("");
 
-  // tenantId remains editable as a fallback, but should auto-populate from email selection.
+  // tenantId is editable as a fallback (if tenant mapping isn't returned by /email-accounts).
   const [tenantId, setTenantId] = useState<string>("");
 
   const [kind, setKind] = useState<KBKind>("knowledge");
@@ -100,13 +98,20 @@ export function KBUploadPanel() {
 
   function tenantFromAccount(a: EmailAccount | null): string {
     if (!a) return "";
-    // IMPORTANT:
-    // - Current Control Plane EmailAccountOut includes user_id but NOT tenant_id.
-    // - For our tenant-scoped KB operations, we treat user_id as tenant_id.
-    // - If/when Control Plane adds tenant_id explicitly, it will override this fallback.
-    const tid =
-      (a.tenant_id || a.tenantId || a.user_id || a.userId || "").toString().trim();
-    return tid;
+    // Prefer explicit tenant_id fields, then fallback to user_id (current model behavior).
+    return ((a.tenant_id || a.tenantId || a.user_id || a.userId || "") as string).toString().trim();
+  }
+
+  async function copyValue(label: string, value: string) {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      setUploadOk(`Copied ${label}.`);
+      setUploadErr("");
+    } catch {
+      // Fallback for environments where clipboard API is blocked
+      window.prompt(`Copy ${label}:`, value);
+    }
   }
 
   async function loadAccounts() {
@@ -134,8 +139,6 @@ export function KBUploadPanel() {
       const chosen = (byId && isActive(byId) ? byId : null) || primaryActive || firstActive || rows[0] || null;
 
       if (chosen && !selectedEmailAccountId) setSelectedEmailAccountId(chosen.id);
-
-      // If tenantId not already set, derive it from the chosen account
       if (chosen && !tenantId.trim()) {
         const tid = tenantFromAccount(chosen);
         if (tid) setTenantId(tid);
@@ -340,7 +343,12 @@ export function KBUploadPanel() {
         <div className="grid2">
           <div className="field">
             <label className="label">Email account</label>
-            <select className="input" value={selectedEmailAccountId} onChange={(e) => setSelectedEmailAccountId(e.target.value)} disabled={accountsLoading}>
+            <select
+              className="input"
+              value={selectedEmailAccountId}
+              onChange={(e) => setSelectedEmailAccountId(e.target.value)}
+              disabled={accountsLoading}
+            >
               <option value="">{accountsLoading ? "(loading…)" : "(select email)"}</option>
               {accounts.map((a) => {
                 const email = a.email_address || a.display_name || a.id;
@@ -351,13 +359,13 @@ export function KBUploadPanel() {
                     {email}
                     {a.provider_type ? ` (${a.provider_type})` : ""}
                     {flags ? ` — ${flags}` : ""}
-                    {tid ? ` — tenant ${tid}` : ""}
+                    {tid ? ` — tenant ${tid}` : " — (no tenant mapping)"}
                   </option>
                 );
               })}
             </select>
             <div className="help">
-              Selecting an email account will auto-fill <span className="mono">tenant_id</span>. (Currently we treat <span className="mono">user_id</span> from the email account as the tenant id.)
+              This maps to tenant_id for KB operations. If tenant mapping is missing, paste tenant_id manually on the right.
             </div>
             {accountsErr ? <div className="error" style={{ marginTop: 8 }}>{accountsErr}</div> : null}
           </div>
@@ -451,6 +459,14 @@ export function KBUploadPanel() {
                     <div style={{ fontWeight: 600 }}>{it.filename}</div>
                     <div className="help" style={{ marginTop: 2 }}>
                       {it.content_type} {it.sha256 ? `• sha256 ${it.sha256.slice(0, 10)}…` : ""}
+                    </div>
+                    <div className="help" style={{ marginTop: 2, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <span>
+                        File ID: <span className="mono">{it.id}</span>
+                      </span>
+                      <button type="button" className="btnSecondary" onClick={() => copyValue("file id", it.id)}>
+                        Copy ID
+                      </button>
                     </div>
                   </td>
                   <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.kind}</td>
