@@ -17,37 +17,39 @@ type KBFileRow = {
   created_at: string;
 };
 
-type ListResp = {
-  items: KBFileRow[];
-  has_more: boolean;
-  next_offset: number | null;
+type EmailAccount = {
+  id: string;
+  provider_type: string;
+  oauth_provider?: string | null;
+  email_address?: string | null;
+  display_name?: string | null;
+  is_primary: boolean;
+  is_active: boolean;
+
+  // If the Control Plane includes tenant mapping, we can use it.
+  tenant_id?: string | null;
+  tenantId?: string | null;
 };
 
-type UploadTokenResp = {
-  upload_url: string;
-  upload_token: string;
-  expires_in_s: number;
-};
+type ListResp = { items: KBFileRow[]; has_more?: boolean; next_offset?: number | null };
 
-type DownloadTokenResp = {
-  download_url: string;
-  expires_in_s: number;
-};
+type UploadTokenResp = { upload_url: string; upload_token: string; expires_in_s: number };
+
+type DownloadTokenResp = { download_url: string; download_token: string; expires_in_s: number };
 
 const DEFAULT_LIMIT = 50;
-const LS_TENANT_KEY = "vozlia.admin.kb.tenant_id";
 
-function formatBytes(n?: number) {
-  if (typeof n !== "number" || Number.isNaN(n)) return "";
-  const units = ["B", "KB", "MB", "GB"];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i += 1;
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n)) return String(n);
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let x = n;
+  let u = 0;
+  while (x >= 1024 && u < units.length - 1) {
+    x /= 1024;
+    u += 1;
   }
-  const rounded = i === 0 ? String(Math.round(v)) : v.toFixed(1);
-  return `${rounded} ${units[i]}`;
+  return `${x.toFixed(x >= 10 ? 1 : 2)} ${units[u]}`;
 }
 
 function safeJsonParse<T>(text: string): T | null {
@@ -58,11 +60,22 @@ function safeJsonParse<T>(text: string): T | null {
   }
 }
 
-export function KBUploadPanel() {
-  const [tenantId, setTenantId] = useState<string>("");
-  const [kind, setKind] = useState<KBKind>("knowledge");
+const LS_TENANT_KEY = "vozlia.kb.tenant_id";
+const LS_EMAIL_ACCOUNT_KEY = "vozlia.kb.email_account_id";
 
+export function KBUploadPanel() {
+  const [accounts, setAccounts] = useState<EmailAccount[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+  const [accountsErr, setAccountsErr] = useState("");
+
+  const [selectedEmailAccountId, setSelectedEmailAccountId] = useState<string>("");
+
+  // NOTE: tenantId is still editable as a fallback (if tenant mapping isn't returned by /email-accounts yet).
+  const [tenantId, setTenantId] = useState<string>("");
+
+  const [kind, setKind] = useState<KBKind>("knowledge");
   const [q, setQ] = useState<string>("");
+
   const [items, setItems] = useState<KBFileRow[]>([]);
   const [listBusy, setListBusy] = useState(false);
   const [listErr, setListErr] = useState<string>("");
@@ -74,33 +87,64 @@ export function KBUploadPanel() {
 
   const canQuery = useMemo(() => !!tenantId.trim(), [tenantId]);
 
-  // Load last tenant id for convenience (debug UX)
-  useEffect(() => {
-    try {
-      const prev = window.localStorage.getItem(LS_TENANT_KEY);
-      if (prev && prev.trim()) setTenantId(prev.trim());
-    } catch {
-      // ignore
-    }
-  }, []);
+  const selectedAccount = useMemo(
+    () => accounts.find((a) => a.id === selectedEmailAccountId) || null,
+    [accounts, selectedEmailAccountId],
+  );
 
-  useEffect(() => {
+  function tenantFromAccount(a: EmailAccount | null): string {
+    if (!a) return "";
+    return ((a.tenant_id || a.tenantId || "") as string).toString().trim();
+  }
+
+  async function loadAccounts() {
+    setAccountsLoading(true);
+    setAccountsErr("");
     try {
-      if (tenantId.trim()) window.localStorage.setItem(LS_TENANT_KEY, tenantId.trim());
-    } catch {
-      // ignore
+      const r = await fetch("/api/admin/email-accounts?include_inactive=true", { method: "GET" });
+      const t = await r.text();
+      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+
+      const data = safeJsonParse<any>(t);
+      const rows: EmailAccount[] = Array.isArray(data) ? data : [];
+      setAccounts(rows);
+
+      // Default selection: localStorage -> primary active -> first active -> first
+      let prev = "";
+      try {
+        prev = window.localStorage.getItem(LS_EMAIL_ACCOUNT_KEY) || "";
+      } catch {}
+
+      const isActive = (x: EmailAccount) => x.is_active !== false;
+      const byId = prev ? rows.find((x) => x.id === prev) : null;
+      const primaryActive = rows.find((x) => x.is_primary && isActive(x));
+      const firstActive = rows.find((x) => isActive(x));
+      const chosen = (byId && isActive(byId) ? byId : null) || primaryActive || firstActive || rows[0] || null;
+
+      if (chosen && !selectedEmailAccountId) setSelectedEmailAccountId(chosen.id);
+      if (chosen && !tenantId.trim()) {
+        const tid = tenantFromAccount(chosen);
+        if (tid) setTenantId(tid);
+      }
+    } catch (e: any) {
+      setAccountsErr(e?.message || String(e));
+      setAccounts([]);
+    } finally {
+      setAccountsLoading(false);
     }
-  }, [tenantId]);
+  }
 
   async function refresh() {
+    setListErr("");
+    setUploadOk("");
+    setUploadErr("");
+
     if (!tenantId.trim()) {
       setItems([]);
-      setListErr("Enter a tenant_id to list files.");
       return;
     }
 
     setListBusy(true);
-    setListErr("");
     try {
       const url = new URL("/api/admin/kb/files", window.location.origin);
       url.searchParams.set("tenant_id", tenantId.trim());
@@ -111,6 +155,7 @@ export function KBUploadPanel() {
       const r = await fetch(url.toString(), { method: "GET" });
       const t = await r.text();
       if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+
       const json = safeJsonParse<ListResp>(t);
       if (!json) throw new Error("Invalid JSON from /api/admin/kb/files");
       setItems(json.items || []);
@@ -122,68 +167,51 @@ export function KBUploadPanel() {
     }
   }
 
-  useEffect(() => {
-    // Auto-refresh list when tenant id becomes available (but not on every keystroke)
-    if (!tenantId.trim()) return;
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function uploadSelectedFile() {
+  async function upload() {
     setUploadErr("");
     setUploadOk("");
 
-    const tid = tenantId.trim();
-    if (!tid) {
-      setUploadErr("tenant_id is required.");
+    if (!tenantId.trim()) {
+      setUploadErr("Select an email account / tenant first.");
       return;
     }
     if (!file) {
-      setUploadErr("Choose a file to upload.");
+      setUploadErr("Choose a file first.");
       return;
     }
 
     setUploadBusy(true);
     try {
-      // 1) Mint upload token via WebUI → Control Plane proxy
-      const tokenResp = await fetch("/api/admin/kb/files/upload-token", {
+      const tokenRes = await fetch("/api/admin/kb/files/upload-token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          tenant_id: tid,
+          tenant_id: tenantId.trim(),
           filename: file.name,
           content_type: file.type || "application/octet-stream",
           kind,
         }),
       });
 
-      const tokenText = await tokenResp.text();
-      if (!tokenResp.ok) throw new Error(tokenText || `HTTP ${tokenResp.status}`);
+      const tokenText = await tokenRes.text();
+      if (!tokenRes.ok) throw new Error(tokenText || `HTTP ${tokenRes.status}`);
       const tokenJson = safeJsonParse<UploadTokenResp>(tokenText);
-      if (!tokenJson?.upload_url || !tokenJson?.upload_token) {
-        throw new Error("Invalid upload token response from /api/admin/kb/files/upload-token");
-      }
+      if (!tokenJson) throw new Error("Invalid JSON from /api/admin/kb/files/upload-token");
 
-      // 2) Upload directly to Control Plane (browser → control plane)
       const fd = new FormData();
       fd.append("file", file, file.name);
 
-      const up = await fetch(tokenJson.upload_url, {
+      const r = await fetch(tokenJson.upload_url, {
         method: "POST",
-        headers: {
-          "X-Vozlia-Upload-Token": tokenJson.upload_token,
-        },
+        headers: { "X-Vozlia-Upload-Token": tokenJson.upload_token },
         body: fd,
       });
 
-      const upText = await up.text();
-      if (!up.ok) throw new Error(upText || `Upload failed (HTTP ${up.status})`);
+      const t = await r.text();
+      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
 
-      setUploadOk(`Uploaded: ${file.name}`);
+      setUploadOk("Uploaded.");
       setFile(null);
-
-      // 3) Refresh list
       await refresh();
     } catch (e: any) {
       setUploadErr(e?.message || String(e));
@@ -195,23 +223,23 @@ export function KBUploadPanel() {
   async function requestDownload(fileId: string) {
     setUploadErr("");
     setUploadOk("");
-    const tid = tenantId.trim();
-    if (!tid) {
-      setUploadErr("tenant_id is required.");
+
+    if (!tenantId.trim()) {
+      setUploadErr("Select an email account / tenant first.");
       return;
     }
 
     try {
       const url = new URL(`/api/admin/kb/files/${fileId}/download-token`, window.location.origin);
-      url.searchParams.set("tenant_id", tid);
+      url.searchParams.set("tenant_id", tenantId.trim());
 
       const r = await fetch(url.toString(), { method: "GET" });
       const t = await r.text();
       if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
-      const json = safeJsonParse<DownloadTokenResp>(t);
-      if (!json?.download_url) throw new Error("Invalid download token response");
 
-      // Open in a new tab/window to trigger the download via Control Plane /kb/download.
+      const json = safeJsonParse<DownloadTokenResp>(t);
+      if (!json) throw new Error("Invalid JSON from /api/admin/kb/files/{id}/download-token");
+
       window.open(json.download_url, "_blank", "noopener,noreferrer");
     } catch (e: any) {
       setUploadErr(e?.message || String(e));
@@ -221,18 +249,18 @@ export function KBUploadPanel() {
   async function deleteFile(fileId: string) {
     setUploadErr("");
     setUploadOk("");
-    const tid = tenantId.trim();
-    if (!tid) {
-      setUploadErr("tenant_id is required.");
+
+    if (!tenantId.trim()) {
+      setUploadErr("Select an email account / tenant first.");
       return;
     }
 
-    const ok = window.confirm("Delete this KB file? This will remove the object and metadata.");
+    const ok = confirm("Delete this KB file? This removes the object and metadata.");
     if (!ok) return;
 
     try {
       const url = new URL(`/api/admin/kb/files/${fileId}`, window.location.origin);
-      url.searchParams.set("tenant_id", tid);
+      url.searchParams.set("tenant_id", tenantId.trim());
 
       const r = await fetch(url.toString(), { method: "DELETE" });
       const t = await r.text();
@@ -245,6 +273,48 @@ export function KBUploadPanel() {
     }
   }
 
+  // Init: restore last selection for debug UX, then load accounts
+  useEffect(() => {
+    try {
+      const prevTenant = window.localStorage.getItem(LS_TENANT_KEY) || "";
+      if (prevTenant) setTenantId(prevTenant);
+
+      const prevEmail = window.localStorage.getItem(LS_EMAIL_ACCOUNT_KEY) || "";
+      if (prevEmail) setSelectedEmailAccountId(prevEmail);
+    } catch {
+      // ignore
+    }
+    loadAccounts().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist for convenience
+  useEffect(() => {
+    try {
+      if (tenantId.trim()) window.localStorage.setItem(LS_TENANT_KEY, tenantId.trim());
+    } catch {}
+  }, [tenantId]);
+
+  useEffect(() => {
+    try {
+      if (selectedEmailAccountId) window.localStorage.setItem(LS_EMAIL_ACCOUNT_KEY, selectedEmailAccountId);
+    } catch {}
+  }, [selectedEmailAccountId]);
+
+  // When email selection changes, auto-fill tenantId if mapping exists.
+  useEffect(() => {
+    const tid = tenantFromAccount(selectedAccount);
+    if (tid) setTenantId(tid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEmailAccountId]);
+
+  // Load list once tenant becomes available
+  useEffect(() => {
+    if (!tenantId.trim()) return;
+    refresh().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId]);
+
   return (
     <div className="panel" style={{ marginTop: 14 }}>
       <div className="panelTitle">KB Files</div>
@@ -253,21 +323,47 @@ export function KBUploadPanel() {
       </div>
 
       <div className="form" style={{ marginTop: 12 }}>
-        <div className="field">
-          <label className="label">tenant_id</label>
-          <input
-            className="input"
-            value={tenantId}
-            onChange={(e) => setTenantId(e.target.value)}
-            placeholder="TENANT_UUID"
-            spellCheck={false}
-            autoCapitalize="none"
-            autoCorrect="off"
-          />
-          <div className="help">Required. All KB operations are tenant-scoped.</div>
+        <div className="grid2">
+          <div className="field">
+            <label className="label">Email account</label>
+            <select className="input" value={selectedEmailAccountId} onChange={(e) => setSelectedEmailAccountId(e.target.value)} disabled={accountsLoading}>
+              <option value="">{accountsLoading ? "(loading…)" : "(select email)"}</option>
+              {accounts.map((a) => {
+                const email = a.email_address || a.display_name || a.id;
+                const flags = [a.is_primary ? "primary" : "", !a.is_active ? "inactive" : ""].filter(Boolean).join(", ");
+                const tid = tenantFromAccount(a);
+                return (
+                  <option key={a.id} value={a.id}>
+                    {email}
+                    {a.provider_type ? ` (${a.provider_type})` : ""}
+                    {flags ? ` — ${flags}` : ""}
+                    {tid ? ` — tenant ${tid}` : " — (no tenant mapping)"}
+                  </option>
+                );
+              })}
+            </select>
+            <div className="help">
+              Maps to tenant_id for KB operations. If tenant mapping is missing, paste tenant_id manually on the right.
+            </div>
+            {accountsErr ? <div className="error" style={{ marginTop: 8 }}>{accountsErr}</div> : null}
+          </div>
+
+          <div className="field">
+            <label className="label">tenant_id</label>
+            <input
+              className="input mono"
+              value={tenantId}
+              onChange={(e) => setTenantId(e.target.value)}
+              placeholder="TENANT_UUID"
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
+            />
+            <div className="help">Required. All KB operations are tenant-scoped.</div>
+          </div>
         </div>
 
-        <div className="grid2">
+        <div className="grid2" style={{ alignItems: "end" }}>
           <div className="field">
             <label className="label">Kind</label>
             <select className="input" value={kind} onChange={(e) => setKind(e.target.value as KBKind)}>
@@ -287,12 +383,7 @@ export function KBUploadPanel() {
         <div className="grid2" style={{ alignItems: "end" }}>
           <div className="field">
             <label className="label">File</label>
-            <input
-              className="input"
-              type="file"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              disabled={!canQuery || uploadBusy}
-            />
+            <input className="input" type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} disabled={uploadBusy} />
             <div className="help">
               {file ? (
                 <>
@@ -305,25 +396,27 @@ export function KBUploadPanel() {
           </div>
 
           <div className="actions">
+            <button type="button" className="btnPrimary" onClick={upload} disabled={!canQuery || uploadBusy || !file}>
+              {uploadBusy ? "Uploading…" : "Upload"}
+            </button>
+
             <button type="button" className="btnSecondary" onClick={refresh} disabled={!canQuery || listBusy}>
               {listBusy ? "Refreshing…" : "Refresh"}
             </button>
-            <button type="button" className="btnPrimary" onClick={uploadSelectedFile} disabled={!canQuery || uploadBusy || !file}>
-              {uploadBusy ? "Uploading…" : "Upload"}
+
+            <button type="button" className="btnSecondary" onClick={loadAccounts} disabled={accountsLoading} style={{ marginLeft: 8 }}>
+              {accountsLoading ? "Loading…" : "Reload"}
             </button>
           </div>
         </div>
 
-        {uploadErr ? <div className="error" style={{ marginTop: 10 }}>{uploadErr}</div> : null}
-        {uploadOk ? <div className="ok" style={{ marginTop: 10 }}>{uploadOk}</div> : null}
-        {listErr ? <div className="error" style={{ marginTop: 10 }}>{listErr}</div> : null}
-      </div>
-
-      <div style={{ marginTop: 14 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-          <div style={{ fontWeight: 700 }}>Files</div>
-          <div style={{ opacity: 0.7, fontSize: 12 }}>{items.length} shown</div>
-        </div>
+        {(uploadErr || listErr || uploadOk) && (
+          <div style={{ marginTop: 10 }}>
+            {uploadErr ? <div className="error">{uploadErr}</div> : null}
+            {listErr ? <div className="error" style={{ marginTop: 8 }}>{listErr}</div> : null}
+            {uploadOk ? <div className="success" style={{ marginTop: 8 }}>{uploadOk}</div> : null}
+          </div>
+        )}
 
         <div style={{ marginTop: 8, overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -342,16 +435,14 @@ export function KBUploadPanel() {
                 <tr key={it.id}>
                   <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>
                     <div style={{ fontWeight: 600 }}>{it.filename}</div>
-                    <div style={{ fontSize: 12, opacity: 0.75, marginTop: 2 }}>
+                    <div className="help" style={{ marginTop: 2 }}>
                       {it.content_type} {it.sha256 ? `• sha256 ${it.sha256.slice(0, 10)}…` : ""}
                     </div>
                   </td>
                   <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.kind}</td>
                   <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.status}</td>
                   <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{formatBytes(it.size_bytes)}</td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>
-                    {it.created_at ? new Date(it.created_at).toLocaleString() : ""}
-                  </td>
+                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.created_at ? new Date(it.created_at).toLocaleString() : ""}</td>
                   <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)", textAlign: "right" }}>
                     <button type="button" className="btnSecondary" onClick={() => requestDownload(it.id)} style={{ marginRight: 8 }}>
                       Download
@@ -365,7 +456,7 @@ export function KBUploadPanel() {
               {!items.length ? (
                 <tr>
                   <td colSpan={6} style={{ padding: 10, opacity: 0.75 }}>
-                    {tenantId.trim() ? "No KB files yet." : "Enter a tenant_id to list KB files."}
+                    {tenantId.trim() ? "No KB files yet." : "Select an email account (or enter a tenant_id) to list KB files."}
                   </td>
                 </tr>
               ) : null}
