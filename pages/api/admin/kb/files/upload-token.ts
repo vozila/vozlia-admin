@@ -8,25 +8,30 @@ function mustEnv(name: string): string {
   return v;
 }
 
-/**
- * Vercel API Route: /api/admin/kb/files/upload-token
- * POST -> /admin/kb/files/upload-token on control plane.
- *
- * We add `uploaded_by` from the authenticated admin session (email) server-side
- * so the browser never sends it.
- */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  const session = await getServerSession(req, res, authOptions);
-  if (!session) return res.status(401).json({ error: "Unauthorized" });
-
   try {
-    const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
-    const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
+    const session = await getServerSession(req, res, authOptions);
+    if (!session?.user?.email) return res.status(401).json({ error: "Unauthorized" });
 
     if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-    const body = typeof req.body === "object" && req.body ? req.body : {};
-    const uploaded_by = typeof session.user?.email === "string" ? session.user.email : undefined;
+    const { tenant_id, filename, content_type, kind } = (req.body ?? {}) as Record<string, unknown>;
+
+    if (!tenant_id || typeof tenant_id !== "string" || !tenant_id.trim()) {
+      return res.status(400).json({ error: "Missing tenant_id" });
+    }
+    if (!filename || typeof filename !== "string" || !filename.trim()) {
+      return res.status(400).json({ error: "Missing filename" });
+    }
+    if (!content_type || typeof content_type !== "string" || !content_type.trim()) {
+      return res.status(400).json({ error: "Missing content_type" });
+    }
+    if (!kind || typeof kind !== "string" || !kind.trim()) {
+      return res.status(400).json({ error: "Missing kind" });
+    }
+
+    const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL");
+    const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
 
     const upstream = await fetch(`${CONTROL_BASE}/admin/kb/files/upload-token`, {
       method: "POST",
@@ -35,7 +40,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body: JSON.stringify({ ...body, uploaded_by }),
+      body: JSON.stringify({
+        tenant_id: tenant_id.trim(),
+        filename: filename.trim(),
+        content_type: content_type.trim(),
+        kind: kind.trim(),
+      }),
     });
 
     const text = await upstream.text();
