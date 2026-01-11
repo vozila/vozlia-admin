@@ -8,35 +8,43 @@ function mustEnv(name: string): string {
   return v;
 }
 
-/**
- * Vercel API Route: /api/admin/kb/files/:id
- * GET    -> /admin/kb/files/:id on control plane (metadata)
- * DELETE -> /admin/kb/files/:id on control plane (delete object + metadata)
- */
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  const session = await getServerSession(req, res, authOptions);
-  if (!session) return res.status(401).json({ error: "Unauthorized" });
+function appendQuery(url: string, query: NextApiRequest["query"]): string {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(query || {})) {
+    if (Array.isArray(v)) {
+      for (const vv of v) params.append(k, String(vv));
+    } else if (v !== undefined) {
+      params.set(k, String(v));
+    }
+  }
+  const qs = params.toString();
+  return qs ? `${url}?${qs}` : url;
+}
 
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
-    const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
+    const session = await getServerSession(req, res, authOptions);
+    if (!session?.user?.email) return res.status(401).json({ error: "Unauthorized" });
 
     const id = req.query.id;
     if (!id || typeof id !== "string") return res.status(400).json({ error: "Missing id" });
 
-    // tenant_id is REQUIRED by control plane for isolation
-    const tenant_id = req.query.tenant_id;
-    if (!tenant_id || typeof tenant_id !== "string") {
+    const tenantId = req.query.tenant_id;
+    if (!tenantId || typeof tenantId !== "string" || !tenantId.trim()) {
       return res.status(400).json({ error: "Missing tenant_id" });
     }
 
-    const url = `${CONTROL_BASE}/admin/kb/files/${encodeURIComponent(id)}?tenant_id=${encodeURIComponent(tenant_id)}`;
+    if (req.method !== "GET" && req.method !== "DELETE") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
 
-    const method = req.method || "GET";
-    if (method !== "GET" && method !== "DELETE") return res.status(405).json({ error: "Method not allowed" });
+    const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL");
+    const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
+
+    const url = appendQuery(`${CONTROL_BASE}/admin/kb/files/${encodeURIComponent(id)}`, req.query);
 
     const upstream = await fetch(url, {
-      method,
+      method: req.method,
       headers: {
         "X-Vozlia-Admin-Key": ADMIN_KEY,
         Accept: "application/json",
