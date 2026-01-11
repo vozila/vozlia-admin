@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+
+type KBKind = "knowledge" | "policy";
 
 type KBFileRow = {
   id: string;
@@ -6,321 +8,363 @@ type KBFileRow = {
   kind: string;
   status: string;
   filename: string;
-  content_type?: string | null;
-  size_bytes?: number | null;
-  sha256?: string | null;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  storage_bucket?: string | null;
+  storage_key?: string | null;
   uploaded_by?: string | null;
   created_at: string;
 };
 
-type ListPayload = {
+type ListResp = {
   items: KBFileRow[];
   has_more: boolean;
-  next_offset?: number | null;
+  next_offset: number | null;
 };
 
-function fmtBytes(n?: number | null): string {
-  if (!n || n <= 0) return "";
+type UploadTokenResp = {
+  upload_url: string;
+  upload_token: string;
+  expires_in_s: number;
+};
+
+type DownloadTokenResp = {
+  download_url: string;
+  expires_in_s: number;
+};
+
+const DEFAULT_LIMIT = 50;
+const LS_TENANT_KEY = "vozlia.admin.kb.tenant_id";
+
+function formatBytes(n?: number) {
+  if (typeof n !== "number" || Number.isNaN(n)) return "";
   const units = ["B", "KB", "MB", "GB"];
-  let x = n;
+  let v = n;
   let i = 0;
-  while (x >= 1024 && i < units.length - 1) {
-    x /= 1024;
-    i++;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
   }
-  return `${x.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+  const rounded = i === 0 ? String(Math.round(v)) : v.toFixed(1);
+  return `${rounded} ${units[i]}`;
+}
+
+function safeJsonParse<T>(text: string): T | null {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
 }
 
 export function KBUploadPanel() {
-  const [tenantId, setTenantId] = useState("");
-  const [kind, setKind] = useState<"knowledge" | "policy">("knowledge");
-  const [q, setQ] = useState("");
+  const [tenantId, setTenantId] = useState<string>("");
+  const [kind, setKind] = useState<KBKind>("knowledge");
+
+  const [q, setQ] = useState<string>("");
+  const [items, setItems] = useState<KBFileRow[]>([]);
+  const [listBusy, setListBusy] = useState(false);
+  const [listErr, setListErr] = useState<string>("");
+
   const [file, setFile] = useState<File | null>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [uploadErr, setUploadErr] = useState<string>("");
+  const [uploadOk, setUploadOk] = useState<string>("");
 
-  const [rows, setRows] = useState<KBFileRow[]>([]);
-  const [err, setErr] = useState<string>("");
-  const [status, setStatus] = useState<string>("");
-  const [busy, setBusy] = useState(false);
+  const canQuery = useMemo(() => !!tenantId.trim(), [tenantId]);
 
-  const canQuery = useMemo(() => tenantId.trim().length > 0, [tenantId]);
+  // Load last tenant id for convenience (debug UX)
+  useEffect(() => {
+    try {
+      const prev = window.localStorage.getItem(LS_TENANT_KEY);
+      if (prev && prev.trim()) setTenantId(prev.trim());
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (tenantId.trim()) window.localStorage.setItem(LS_TENANT_KEY, tenantId.trim());
+    } catch {
+      // ignore
+    }
+  }, [tenantId]);
 
   async function refresh() {
     if (!tenantId.trim()) {
-      setRows([]);
+      setItems([]);
+      setListErr("Enter a tenant_id to list files.");
       return;
     }
-    setErr("");
+
+    setListBusy(true);
+    setListErr("");
     try {
-      const params = new URLSearchParams();
-      params.set("tenant_id", tenantId.trim());
-      if (q.trim()) params.set("q", q.trim());
-      const r = await fetch(`/api/admin/kb/files?${params.toString()}`);
+      const url = new URL("/api/admin/kb/files", window.location.origin);
+      url.searchParams.set("tenant_id", tenantId.trim());
+      if (q.trim()) url.searchParams.set("q", q.trim());
+      url.searchParams.set("limit", String(DEFAULT_LIMIT));
+      url.searchParams.set("offset", "0");
+
+      const r = await fetch(url.toString(), { method: "GET" });
       const t = await r.text();
-      if (!r.ok) throw new Error(t);
-      const payload = JSON.parse(t) as ListPayload;
-      setRows(payload.items || []);
+      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+      const json = safeJsonParse<ListResp>(t);
+      if (!json) throw new Error("Invalid JSON from /api/admin/kb/files");
+      setItems(json.items || []);
     } catch (e: any) {
-      setErr(e?.message || String(e));
+      setItems([]);
+      setListErr(e?.message || String(e));
+    } finally {
+      setListBusy(false);
     }
   }
 
   useEffect(() => {
-    // Don't auto-fetch until tenant_id provided.
+    // Auto-refresh list when tenant id becomes available (but not on every keystroke)
+    if (!tenantId.trim()) return;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function onUpload() {
-    if (!tenantId.trim()) {
-      setStatus("Error: tenant_id is required");
+  async function uploadSelectedFile() {
+    setUploadErr("");
+    setUploadOk("");
+
+    const tid = tenantId.trim();
+    if (!tid) {
+      setUploadErr("tenant_id is required.");
       return;
     }
     if (!file) {
-      setStatus("Error: choose a file first");
+      setUploadErr("Choose a file to upload.");
       return;
     }
 
-    setBusy(true);
-    setStatus("");
-    setErr("");
-
+    setUploadBusy(true);
     try {
-      // 1) Get a short-lived upload token from the control plane via Vercel API route (admin-authenticated).
-      const tokenRes = await fetch(`/api/admin/kb/files/upload-token`, {
+      // 1) Mint upload token via WebUI → Control Plane proxy
+      const tokenResp = await fetch("/api/admin/kb/files/upload-token", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          tenant_id: tenantId.trim(),
+          tenant_id: tid,
           filename: file.name,
           content_type: file.type || "application/octet-stream",
           kind,
         }),
       });
 
-      const tokenText = await tokenRes.text();
-      if (!tokenRes.ok) throw new Error(tokenText);
+      const tokenText = await tokenResp.text();
+      if (!tokenResp.ok) throw new Error(tokenText || `HTTP ${tokenResp.status}`);
+      const tokenJson = safeJsonParse<UploadTokenResp>(tokenText);
+      if (!tokenJson?.upload_url || !tokenJson?.upload_token) {
+        throw new Error("Invalid upload token response from /api/admin/kb/files/upload-token");
+      }
 
-      const tokenJson = JSON.parse(tokenText) as { upload_url: string; upload_token: string };
+      // 2) Upload directly to Control Plane (browser → control plane)
+      const fd = new FormData();
+      fd.append("file", file, file.name);
 
-      // 2) Upload directly to the Control Plane (NOT through Vercel), using the signed token.
-      const form = new FormData();
-      form.append("file", file, file.name);
-
-      const upRes = await fetch(tokenJson.upload_url, {
+      const up = await fetch(tokenJson.upload_url, {
         method: "POST",
         headers: {
           "X-Vozlia-Upload-Token": tokenJson.upload_token,
         },
-        body: form,
+        body: fd,
       });
 
-      const upText = await upRes.text();
-      if (!upRes.ok) throw new Error(upText);
+      const upText = await up.text();
+      if (!up.ok) throw new Error(upText || `Upload failed (HTTP ${up.status})`);
 
-      setStatus("Uploaded.");
+      setUploadOk(`Uploaded: ${file.name}`);
       setFile(null);
 
+      // 3) Refresh list
       await refresh();
     } catch (e: any) {
-      setStatus(`Error: ${e?.message || String(e)}`);
+      setUploadErr(e?.message || String(e));
     } finally {
-      setBusy(false);
+      setUploadBusy(false);
     }
   }
 
-  async function onDelete(id: string) {
-    if (!tenantId.trim()) {
-      setStatus("Error: tenant_id is required");
+  async function requestDownload(fileId: string) {
+    setUploadErr("");
+    setUploadOk("");
+    const tid = tenantId.trim();
+    if (!tid) {
+      setUploadErr("tenant_id is required.");
       return;
     }
-    setBusy(true);
-    setStatus("");
+
     try {
-      const params = new URLSearchParams();
-      params.set("tenant_id", tenantId.trim());
-      const r = await fetch(`/api/admin/kb/files/${encodeURIComponent(id)}?${params.toString()}`, { method: "DELETE" });
+      const url = new URL(`/api/admin/kb/files/${fileId}/download-token`, window.location.origin);
+      url.searchParams.set("tenant_id", tid);
+
+      const r = await fetch(url.toString(), { method: "GET" });
       const t = await r.text();
-      if (!r.ok) throw new Error(t);
-      setStatus("Deleted.");
-      await refresh();
+      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+      const json = safeJsonParse<DownloadTokenResp>(t);
+      if (!json?.download_url) throw new Error("Invalid download token response");
+
+      // Open in a new tab/window to trigger the download via Control Plane /kb/download.
+      window.open(json.download_url, "_blank", "noopener,noreferrer");
     } catch (e: any) {
-      setStatus(`Error: ${e?.message || String(e)}`);
-    } finally {
-      setBusy(false);
+      setUploadErr(e?.message || String(e));
     }
   }
 
-  async function onDownload(id: string) {
-    if (!tenantId.trim()) {
-      setStatus("Error: tenant_id is required");
+  async function deleteFile(fileId: string) {
+    setUploadErr("");
+    setUploadOk("");
+    const tid = tenantId.trim();
+    if (!tid) {
+      setUploadErr("tenant_id is required.");
       return;
     }
-    setBusy(true);
-    setStatus("");
+
+    const ok = window.confirm("Delete this KB file? This will remove the object and metadata.");
+    if (!ok) return;
+
     try {
-      const params = new URLSearchParams();
-      params.set("tenant_id", tenantId.trim());
+      const url = new URL(`/api/admin/kb/files/${fileId}`, window.location.origin);
+      url.searchParams.set("tenant_id", tid);
 
-      const r = await fetch(`/api/admin/kb/files/${encodeURIComponent(id)}/download-token?${params.toString()}`);
+      const r = await fetch(url.toString(), { method: "DELETE" });
       const t = await r.text();
-      if (!r.ok) throw new Error(t);
+      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
 
-      const j = JSON.parse(t) as { download_url: string };
-      window.open(j.download_url, "_blank", "noopener,noreferrer");
-      setStatus("Download started.");
+      setUploadOk("Deleted.");
+      await refresh();
     } catch (e: any) {
-      setStatus(`Error: ${e?.message || String(e)}`);
-    } finally {
-      setBusy(false);
+      setUploadErr(e?.message || String(e));
     }
   }
 
   return (
-    <section style={{ border: "1px solid rgba(255,255,255,0.15)", borderRadius: 10, marginTop: 18 }}>
-      <div style={{ padding: 14, borderBottom: "1px solid rgba(255,255,255,0.10)" }}>
-        <div style={{ fontSize: 16, fontWeight: 700 }}>KB Files</div>
-        <div style={{ opacity: 0.8, marginTop: 6 }}>
-          Upload tenant documents (knowledge + policy/rules). Stored in object storage; metadata in Postgres.
-        </div>
+    <div className="panel" style={{ marginTop: 14 }}>
+      <div className="panelTitle">KB Files</div>
+      <div className="panelSub">
+        Upload tenant KB documents (knowledge) and tenant policy/rules documents (policy). Uploads go WebUI → Control Plane.
       </div>
 
-      <div style={{ padding: 14 }}>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
-          <label style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 260 }}>
-            <span style={{ opacity: 0.85 }}>tenant_id (required)</span>
-            <input
-              value={tenantId}
-              onChange={(e) => setTenantId(e.target.value)}
-              placeholder="e.g. b4d2353b-667f-4fd2-8ca7-a882e20b9ec3"
-              style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "white" }}
-            />
-          </label>
+      <div className="form" style={{ marginTop: 12 }}>
+        <div className="field">
+          <label className="label">tenant_id</label>
+          <input
+            className="input"
+            value={tenantId}
+            onChange={(e) => setTenantId(e.target.value)}
+            placeholder="TENANT_UUID"
+            spellCheck={false}
+            autoCapitalize="none"
+            autoCorrect="off"
+          />
+          <div className="help">Required. All KB operations are tenant-scoped.</div>
+        </div>
 
-          <label style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 180 }}>
-            <span style={{ opacity: 0.85 }}>kind</span>
-            <select
-              value={kind}
-              onChange={(e) => setKind((e.target.value as any) || "knowledge")}
-              style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "white" }}
-            >
+        <div className="grid2">
+          <div className="field">
+            <label className="label">Kind</label>
+            <select className="input" value={kind} onChange={(e) => setKind(e.target.value as KBKind)}>
               <option value="knowledge">knowledge</option>
               <option value="policy">policy</option>
             </select>
-          </label>
+            <div className="help">policy docs will later become high-priority instructions; knowledge docs become retrieval context.</div>
+          </div>
 
-          <label style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 260 }}>
-            <span style={{ opacity: 0.85 }}>file</span>
+          <div className="field">
+            <label className="label">Search</label>
+            <input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="filename contains…" />
+            <div className="help">Optional. Search is filename-based (q=).</div>
+          </div>
+        </div>
+
+        <div className="grid2" style={{ alignItems: "end" }}>
+          <div className="field">
+            <label className="label">File</label>
             <input
+              className="input"
               type="file"
-              onChange={(e) => setFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
-              style={{ color: "white" }}
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              disabled={!canQuery || uploadBusy}
             />
-          </label>
+            <div className="help">
+              {file ? (
+                <>
+                  Selected: <b>{file.name}</b> ({formatBytes(file.size)}) {file.type ? `• ${file.type}` : ""}
+                </>
+              ) : (
+                "Choose a file to upload."
+              )}
+            </div>
+          </div>
 
-          <button
-            type="button"
-            onClick={onUpload}
-            disabled={busy || !canQuery || !file}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: "1px solid rgba(255,255,255,0.2)",
-              background: busy ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.12)",
-              color: "white",
-              cursor: busy ? "not-allowed" : "pointer",
-              marginTop: 22,
-            }}
-          >
-            {busy ? "Working..." : "Upload"}
-          </button>
-
-          <button
-            type="button"
-            onClick={refresh}
-            disabled={busy || !canQuery}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: "1px solid rgba(255,255,255,0.2)",
-              background: "rgba(255,255,255,0.06)",
-              color: "white",
-              cursor: busy ? "not-allowed" : "pointer",
-              marginTop: 22,
-            }}
-          >
-            Refresh
-          </button>
+          <div className="actions">
+            <button type="button" className="btnSecondary" onClick={refresh} disabled={!canQuery || listBusy}>
+              {listBusy ? "Refreshing…" : "Refresh"}
+            </button>
+            <button type="button" className="btnPrimary" onClick={uploadSelectedFile} disabled={!canQuery || uploadBusy || !file}>
+              {uploadBusy ? "Uploading…" : "Upload"}
+            </button>
+          </div>
         </div>
 
-        <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search filename..."
-            style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "white", minWidth: 260 }}
-          />
-          <button
-            type="button"
-            onClick={refresh}
-            disabled={busy || !canQuery}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 8,
-              border: "1px solid rgba(255,255,255,0.2)",
-              background: "rgba(255,255,255,0.06)",
-              color: "white",
-              cursor: busy ? "not-allowed" : "pointer",
-            }}
-          >
-            Search
-          </button>
+        {uploadErr ? <div className="error" style={{ marginTop: 10 }}>{uploadErr}</div> : null}
+        {uploadOk ? <div className="ok" style={{ marginTop: 10 }}>{uploadOk}</div> : null}
+        {listErr ? <div className="error" style={{ marginTop: 10 }}>{listErr}</div> : null}
+      </div>
+
+      <div style={{ marginTop: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <div style={{ fontWeight: 700 }}>Files</div>
+          <div style={{ opacity: 0.7, fontSize: 12 }}>{items.length} shown</div>
         </div>
 
-        {status ? <div style={{ marginTop: 10, whiteSpace: "pre-wrap" }}>{status}</div> : null}
-        {err ? <pre style={{ marginTop: 10, whiteSpace: "pre-wrap", color: "#ffb3b3" }}>{err}</pre> : null}
-
-        <div style={{ overflowX: "auto", marginTop: 12 }}>
+        <div style={{ marginTop: 8, overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr>
-                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(255,255,255,0.15)" }}>Filename</th>
-                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(255,255,255,0.15)" }}>Kind</th>
-                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(255,255,255,0.15)" }}>Status</th>
-                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(255,255,255,0.15)" }}>Size</th>
-                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(255,255,255,0.15)" }}>Created</th>
-                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(255,255,255,0.15)" }}>Actions</th>
+                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Filename</th>
+                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Kind</th>
+                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Status</th>
+                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Size</th>
+                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Created</th>
+                <th style={{ textAlign: "right", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr key={r.id}>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>{r.filename}</td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>{r.kind}</td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>{r.status}</td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>{fmtBytes(r.size_bytes)}</td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>{new Date(r.created_at).toLocaleString()}</td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
-                    <button
-                      type="button"
-                      onClick={() => onDownload(r.id)}
-                      disabled={busy || !canQuery}
-                      style={{ marginRight: 8, padding: "6px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.2)", background: "rgba(255,255,255,0.06)", color: "white" }}
-                    >
+              {items.map((it) => (
+                <tr key={it.id}>
+                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>
+                    <div style={{ fontWeight: 600 }}>{it.filename}</div>
+                    <div style={{ fontSize: 12, opacity: 0.75, marginTop: 2 }}>
+                      {it.content_type} {it.sha256 ? `• sha256 ${it.sha256.slice(0, 10)}…` : ""}
+                    </div>
+                  </td>
+                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.kind}</td>
+                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.status}</td>
+                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{formatBytes(it.size_bytes)}</td>
+                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>
+                    {it.created_at ? new Date(it.created_at).toLocaleString() : ""}
+                  </td>
+                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)", textAlign: "right" }}>
+                    <button type="button" className="btnSecondary" onClick={() => requestDownload(it.id)} style={{ marginRight: 8 }}>
                       Download
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => onDelete(r.id)}
-                      disabled={busy || !canQuery}
-                      style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.2)", background: "rgba(255,255,255,0.06)", color: "white" }}
-                    >
+                    <button type="button" className="btnSecondary" onClick={() => deleteFile(it.id)}>
                       Delete
                     </button>
                   </td>
                 </tr>
               ))}
-              {!rows.length ? (
+              {!items.length ? (
                 <tr>
-                  <td colSpan={6} style={{ padding: 6, opacity: 0.75 }}>
+                  <td colSpan={6} style={{ padding: 10, opacity: 0.75 }}>
                     {tenantId.trim() ? "No KB files yet." : "Enter a tenant_id to list KB files."}
                   </td>
                 </tr>
@@ -328,13 +372,7 @@ export function KBUploadPanel() {
             </tbody>
           </table>
         </div>
-
-        <div style={{ marginTop: 10, opacity: 0.75, fontSize: 12, lineHeight: 1.4 }}>
-          Note: Uploads/downloads go directly from the browser to the Control Plane using a short-lived token.
-          If uploads fail with CORS errors, set <code>CONTROL_CORS_ORIGINS</code> (or <code>CONTROL_CORS_ORIGIN_REGEX</code>)
-          on the Control Plane service to allow your Admin Portal origin.
-        </div>
       </div>
-    </section>
+    </div>
   );
 }
