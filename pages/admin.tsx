@@ -1063,6 +1063,8 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
       <AgentLongTermMemoryTable />
     </div>
   </div>
+
+  <KBUploadPanel />
 </SectionRow>
 <SectionRow
   title="Chit-Chat"
@@ -1290,8 +1292,6 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                 <div className="panelSub">Existing panel embedded near the bottom.</div>
               </div>
               <div style={{ padding: 14, paddingTop: 0 }}>
-                <KBUploadPanel />
-
         <RenderLogsPanel />
               </div>
             </div>
