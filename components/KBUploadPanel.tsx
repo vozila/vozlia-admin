@@ -19,6 +19,12 @@ type KBFileRow = {
 
 type EmailAccount = {
   id: string;
+
+  // IMPORTANT: in current Control Plane this is the owning user's id, and in practice
+  // we treat it as the tenant_id for tenant-scoped operations.
+  user_id?: string | null;
+  userId?: string | null;
+
   provider_type: string;
   oauth_provider?: string | null;
   email_address?: string | null;
@@ -26,7 +32,7 @@ type EmailAccount = {
   is_primary: boolean;
   is_active: boolean;
 
-  // If the Control Plane includes tenant mapping, we can use it.
+  // Future-proof: if/when Control Plane returns an explicit tenant_id mapping.
   tenant_id?: string | null;
   tenantId?: string | null;
 };
@@ -70,7 +76,7 @@ export function KBUploadPanel() {
 
   const [selectedEmailAccountId, setSelectedEmailAccountId] = useState<string>("");
 
-  // NOTE: tenantId is still editable as a fallback (if tenant mapping isn't returned by /email-accounts yet).
+  // tenantId remains editable as a fallback, but should auto-populate from email selection.
   const [tenantId, setTenantId] = useState<string>("");
 
   const [kind, setKind] = useState<KBKind>("knowledge");
@@ -94,7 +100,13 @@ export function KBUploadPanel() {
 
   function tenantFromAccount(a: EmailAccount | null): string {
     if (!a) return "";
-    return ((a.tenant_id || a.tenantId || "") as string).toString().trim();
+    // IMPORTANT:
+    // - Current Control Plane EmailAccountOut includes user_id but NOT tenant_id.
+    // - For our tenant-scoped KB operations, we treat user_id as tenant_id.
+    // - If/when Control Plane adds tenant_id explicitly, it will override this fallback.
+    const tid =
+      (a.tenant_id || a.tenantId || a.user_id || a.userId || "").toString().trim();
+    return tid;
   }
 
   async function loadAccounts() {
@@ -122,6 +134,8 @@ export function KBUploadPanel() {
       const chosen = (byId && isActive(byId) ? byId : null) || primaryActive || firstActive || rows[0] || null;
 
       if (chosen && !selectedEmailAccountId) setSelectedEmailAccountId(chosen.id);
+
+      // If tenantId not already set, derive it from the chosen account
       if (chosen && !tenantId.trim()) {
         const tid = tenantFromAccount(chosen);
         if (tid) setTenantId(tid);
@@ -337,13 +351,13 @@ export function KBUploadPanel() {
                     {email}
                     {a.provider_type ? ` (${a.provider_type})` : ""}
                     {flags ? ` — ${flags}` : ""}
-                    {tid ? ` — tenant ${tid}` : " — (no tenant mapping)"}
+                    {tid ? ` — tenant ${tid}` : ""}
                   </option>
                 );
               })}
             </select>
             <div className="help">
-              Maps to tenant_id for KB operations. If tenant mapping is missing, paste tenant_id manually on the right.
+              Selecting an email account will auto-fill <span className="mono">tenant_id</span>. (Currently we treat <span className="mono">user_id</span> from the email account as the tenant id.)
             </div>
             {accountsErr ? <div className="error" style={{ marginTop: 8 }}>{accountsErr}</div> : null}
           </div>
