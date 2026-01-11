@@ -14,26 +14,27 @@ function appendQuery(url: string, query: NextApiRequest["query"]): string {
     if (Array.isArray(v)) {
       for (const vv of v) params.append(k, String(vv));
     } else if (v !== undefined) {
-      params.append(k, String(v));
+      params.set(k, String(v));
     }
   }
   const qs = params.toString();
   return qs ? `${url}?${qs}` : url;
 }
 
-/**
- * Vercel API Route: /api/admin/kb/files
- * GET -> /admin/kb/files on control plane (list)
- */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  const session = await getServerSession(req, res, authOptions);
-  if (!session) return res.status(401).json({ error: "Unauthorized" });
-
   try {
-    const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
-    const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
+    const session = await getServerSession(req, res, authOptions);
+    if (!session?.user?.email) return res.status(401).json({ error: "Unauthorized" });
 
     if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
+
+    const tenantId = req.query.tenant_id;
+    if (!tenantId || typeof tenantId !== "string" || !tenantId.trim()) {
+      return res.status(400).json({ error: "Missing tenant_id" });
+    }
+
+    const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL");
+    const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
 
     const url = appendQuery(`${CONTROL_BASE}/admin/kb/files`, req.query);
 
