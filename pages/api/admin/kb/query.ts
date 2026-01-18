@@ -15,8 +15,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-    const { tenant_id, query, mode, limit, include_policy } = (req.body || {}) as any;
-
+    const { tenant_id, query, mode, limit, include_policy, kind } = req.body ?? {};
     if (!tenant_id || typeof tenant_id !== "string" || !tenant_id.trim()) {
       return res.status(400).json({ error: "tenant_id is required" });
     }
@@ -24,7 +23,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(400).json({ error: "query is required" });
     }
 
-    const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL").replace(/\/+$/, "");
+    const CONTROL_BASE = mustEnv("VOZLIA_CONTROL_BASE_URL");
     const ADMIN_KEY = mustEnv("VOZLIA_ADMIN_KEY");
 
     const upstream = await fetch(`${CONTROL_BASE}/admin/kb/query`, {
@@ -37,9 +36,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       body: JSON.stringify({
         tenant_id: tenant_id.trim(),
         query: query.trim(),
-        mode: typeof mode === "string" ? mode : undefined,
+        mode: typeof mode === "string" ? mode : "answer",
         limit: typeof limit === "number" ? limit : undefined,
-        include_policy: typeof include_policy === "boolean" ? include_policy : undefined,
+        include_policy: !!include_policy,
+        kind: typeof kind === "string" ? kind : undefined,
       }),
     });
 
