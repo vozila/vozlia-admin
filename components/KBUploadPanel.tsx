@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { KBChatPanel } from "./KBChatPanel";
 
 type KBKind = "knowledge" | "policy";
+type KBQueryMode = "retrieve" | "answer";
 
 type KBFileRow = {
   id: string;
@@ -42,31 +42,50 @@ type UploadTokenResp = { upload_url: string; upload_token: string; expires_in_s:
 
 type DownloadTokenResp = { download_url: string; download_token: string; expires_in_s: number };
 
-type IngestEnqueueResp = {
-  ok?: boolean;
-  job?: {
-    id?: string;
-    status?: string;
-    error?: string | null;
-    created_at?: string | null;
-    started_at?: string | null;
-    finished_at?: string | null;
-  };
+type IngestJob = {
+  id: string;
+  tenant_id: string;
+  file_id: string;
+  status: string;
+  error?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
 };
 
 type IngestStatusResp = {
-  ok?: boolean;
-  status?: string;
-  job?: {
-    id?: string;
-    status?: string;
-    error?: string | null;
-    created_at?: string | null;
-    started_at?: string | null;
-    finished_at?: string | null;
-  };
+  ok: boolean;
+  status: string; // none|queued|running|ready|failed
+  job?: IngestJob | null;
 };
 
+type IngestEnqueueResp = {
+  ok: boolean;
+  job?: IngestJob | null;
+};
+
+type KBQuerySource = {
+  file_id: string;
+  filename: string;
+  content_type: string;
+  kind: string;
+  chunk_index: number;
+  snippet: string;
+  score?: number | null;
+};
+
+type KBQueryResp = {
+  ok: boolean;
+  tenant_id: string;
+  mode: KBQueryMode;
+  retrieval_strategy?: string | null;
+  answer?: string | null;
+  sources?: KBQuerySource[];
+  policy_chars?: number | null;
+  context_chars?: number | null;
+  model?: string | null;
+  latency_ms?: number | null;
+};
 
 const DEFAULT_LIMIT = 50;
 
@@ -91,9 +110,15 @@ function safeJsonParse<T>(text: string): T | null {
   }
 }
 
+function shortErr(s: string, max = 140): string {
+  const t = (s || "").trim();
+  if (!t) return "";
+  if (t.length <= max) return t;
+  return t.slice(0, max - 1) + "…";
+}
+
 const LS_TENANT_KEY = "vozlia.kb.tenant_id";
 const LS_EMAIL_ACCOUNT_KEY = "vozlia.kb.email_account_id";
-const LS_AUTO_INGEST_KEY = "vozlia.kb.auto_ingest";
 
 export function KBUploadPanel() {
   const [accounts, setAccounts] = useState<EmailAccount[]>([]);
@@ -108,20 +133,30 @@ export function KBUploadPanel() {
   const [kind, setKind] = useState<KBKind>("knowledge");
   const [q, setQ] = useState<string>("");
 
-  const [autoIngestAfterUpload, setAutoIngestAfterUpload] = useState<boolean>(true);
-
-  const [ingestBusyById, setIngestBusyById] = useState<Record<string, boolean>>({});
-  const [ingestStatusById, setIngestStatusById] = useState<Record<string, IngestStatusResp | null>>({});
-
-
   const [items, setItems] = useState<KBFileRow[]>([]);
   const [listBusy, setListBusy] = useState(false);
   const [listErr, setListErr] = useState<string>("");
 
   const [file, setFile] = useState<File | null>(null);
+  const [autoIngestAfterUpload, setAutoIngestAfterUpload] = useState(true);
+
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadErr, setUploadErr] = useState<string>("");
   const [uploadOk, setUploadOk] = useState<string>("");
+
+  // Ingest status cache per file_id
+  const [ingestByFile, setIngestByFile] = useState<Record<string, IngestStatusResp | null>>({});
+  const [ingestBusyByFile, setIngestBusyByFile] = useState<Record<string, boolean>>({});
+
+  // KB Q&A
+  const [chatQuery, setChatQuery] = useState<string>("");
+  const [chatMode, setChatMode] = useState<KBQueryMode>("answer");
+  const [chatIncludePolicy, setChatIncludePolicy] = useState<boolean>(true);
+  const [chatLimit, setChatLimit] = useState<number>(8);
+
+  const [chatBusy, setChatBusy] = useState<boolean>(false);
+  const [chatErr, setChatErr] = useState<string>("");
+  const [chatResp, setChatResp] = useState<KBQueryResp | null>(null);
 
   const canQuery = useMemo(() => !!tenantId.trim(), [tenantId]);
 
@@ -168,71 +203,128 @@ export function KBUploadPanel() {
 
       const isActive = (x: EmailAccount) => x.is_active !== false;
       const byId = prev ? rows.find((x) => x.id === prev) : null;
-      const primaryActive = rows.find((x) => x.is_primary && isActive(x));
-      const firstActive = rows.find((x) => isActive(x));
-      const chosen = (byId && isActive(byId) ? byId : null) || primaryActive || firstActive || rows[0] || null;
+      const primary = rows.find((x) => x.is_primary && isActive(x)) || null;
+      const firstActive = rows.find((x) => isActive(x)) || null;
+      const fallback = rows[0] || null;
 
-      if (chosen && !selectedEmailAccountId) setSelectedEmailAccountId(chosen.id);
-      if (chosen && !tenantId.trim()) {
+      const chosen = byId || primary || firstActive || fallback;
+      if (chosen) {
+        setSelectedEmailAccountId(chosen.id);
         const tid = tenantFromAccount(chosen);
         if (tid) setTenantId(tid);
       }
     } catch (e: any) {
       setAccountsErr(e?.message || String(e));
-      setAccounts([]);
     } finally {
       setAccountsLoading(false);
     }
   }
 
   async function refresh() {
-    setListErr("");
-    setUploadOk("");
-    setUploadErr("");
-
-    if (!tenantId.trim()) {
-      setItems([]);
-      return;
-    }
-
     setListBusy(true);
+    setListErr("");
     try {
+      if (!tenantId.trim()) {
+        setItems([]);
+        return;
+      }
+
       const url = new URL("/api/admin/kb/files", window.location.origin);
       url.searchParams.set("tenant_id", tenantId.trim());
-      if (q.trim()) url.searchParams.set("q", q.trim());
       url.searchParams.set("limit", String(DEFAULT_LIMIT));
       url.searchParams.set("offset", "0");
+      if (q.trim()) url.searchParams.set("q", q.trim());
 
       const r = await fetch(url.toString(), { method: "GET" });
       const t = await r.text();
       if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
 
       const json = safeJsonParse<ListResp>(t);
-      if (!json) throw new Error("Invalid JSON from /api/admin/kb/files");
-      setItems(json.items || []);
+      setItems(json?.items || []);
     } catch (e: any) {
-      setItems([]);
       setListErr(e?.message || String(e));
+      setItems([]);
     } finally {
       setListBusy(false);
     }
   }
 
-  async function upload() {
-    setUploadErr("");
-    setUploadOk("");
-
+  async function enqueueIngest(fileId: string, force: boolean) {
     if (!tenantId.trim()) {
       setUploadErr("Select an email account / tenant first.");
       return;
     }
-    if (!file) {
-      setUploadErr("Choose a file first.");
-      return;
-    }
 
-    setUploadBusy(true);
+    setUploadErr("");
+    setUploadOk("");
+    setIngestBusyByFile((p) => ({ ...p, [fileId]: true }));
     try {
+      const r = await fetch(`/api/admin/kb/files/${encodeURIComponent(fileId)}/ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tenant_id: tenantId.trim(), force }),
+      });
+
+      const t = await r.text();
+      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+
+      const json = safeJsonParse<IngestEnqueueResp>(t);
+      const jobStatus = json?.job?.status || "queued";
+      setIngestByFile((p) => ({ ...p, [fileId]: { ok: true, status: jobStatus, job: json?.job || null } }));
+      setUploadOk(force ? "Re-ingest queued." : "Ingest queued.");
+    } catch (e: any) {
+      setUploadErr(e?.message || String(e));
+    } finally {
+      setIngestBusyByFile((p) => ({ ...p, [fileId]: false }));
+    }
+  }
+
+  async function fetchIngestStatus(fileId: string) {
+    if (!tenantId.trim()) return;
+
+    setIngestBusyByFile((p) => ({ ...p, [fileId]: true }));
+    try {
+      const url = new URL(`/api/admin/kb/files/${encodeURIComponent(fileId)}/ingest-status`, window.location.origin);
+      url.searchParams.set("tenant_id", tenantId.trim());
+
+      const r = await fetch(url.toString(), { method: "GET" });
+      const t = await r.text();
+      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+
+      const json = safeJsonParse<IngestStatusResp>(t);
+      if (json) setIngestByFile((p) => ({ ...p, [fileId]: json }));
+    } catch (e: any) {
+      // Don't spam global error; keep it local
+      setIngestByFile((p) => ({
+        ...p,
+        [fileId]: { ok: false, status: "unknown", job: { id: "", tenant_id: tenantId.trim(), file_id: fileId, status: "unknown", error: String(e?.message || e) } },
+      }));
+    } finally {
+      setIngestBusyByFile((p) => ({ ...p, [fileId]: false }));
+    }
+  }
+
+  async function refreshAllIngestStatuses() {
+    const ids = items.map((x) => x.id);
+    if (!ids.length) return;
+
+    // Simple concurrency limiter (batch size 4)
+    const batchSize = 4;
+    for (let i = 0; i < ids.length; i += batchSize) {
+      const batch = ids.slice(i, i + batchSize);
+      await Promise.all(batch.map((id) => fetchIngestStatus(id)));
+    }
+  }
+
+  async function upload() {
+    setUploadBusy(true);
+    setUploadErr("");
+    setUploadOk("");
+    try {
+      if (!tenantId.trim()) throw new Error("Select an email account / tenant first.");
+      if (!file) throw new Error("Select a file first.");
+
+      // Step A: mint upload token (server-side proxy keeps admin key secret)
       const tokenRes = await fetch("/api/admin/kb/files/upload-token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -249,6 +341,7 @@ export function KBUploadPanel() {
       const tokenJson = safeJsonParse<UploadTokenResp>(tokenText);
       if (!tokenJson) throw new Error("Invalid JSON from /api/admin/kb/files/upload-token");
 
+      // Step B: browser uploads directly to Control Plane with short-lived token
       const fd = new FormData();
       fd.append("file", file, file.name);
 
@@ -261,81 +354,24 @@ export function KBUploadPanel() {
       const t = await r.text();
       if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
 
-      const upJson = safeJsonParse<any>(t) || {};
-      const uploadedFileId: string =
-        (upJson?.file?.id || upJson?.file_id || upJson?.id || "").toString().trim();
+      // Optional: auto-ingest (enqueue) to populate kb_chunks for Q&A
+      const uploadJson = safeJsonParse<any>(t);
+      const newFileId: string | null = uploadJson?.file?.id || null;
 
-      // Auto-ingest is strongly recommended so KB Chat can answer immediately.
-      if (autoIngestAfterUpload && uploadedFileId) {
-        await enqueueIngest(uploadedFileId, false, true);
-        setUploadOk("Uploaded. Ingest queued.");
-      } else {
-        setUploadOk("Uploaded.");
-      }
-
+      setUploadOk("Uploaded.");
       setFile(null);
+
       await refresh();
+
+      if (autoIngestAfterUpload && newFileId) {
+        // Fire and forget (but surface error if it fails)
+        await enqueueIngest(newFileId, false);
+        await fetchIngestStatus(newFileId);
+      }
     } catch (e: any) {
       setUploadErr(e?.message || String(e));
     } finally {
       setUploadBusy(false);
-    }
-  }
-
-  async function enqueueIngest(fileId: string, force: boolean, quiet?: boolean) {
-    if (!tenantId.trim()) {
-      if (!quiet) setUploadErr("Select an email account / tenant first.");
-      return;
-    }
-
-    setUploadErr("");
-    if (!quiet) setUploadOk("");
-
-    setIngestBusyById((prev) => ({ ...prev, [fileId]: true }));
-    try {
-      const r = await fetch(`/api/admin/kb/files/${fileId}/ingest`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tenant_id: tenantId.trim(), force: !!force }),
-      });
-
-      const t = await r.text();
-      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
-      const j = safeJsonParse<IngestEnqueueResp>(t) || {};
-      // optimistic update
-      setIngestStatusById((prev) => ({ ...prev, [fileId]: { ok: true, status: j?.job?.status || "queued", job: j?.job } }));
-
-      if (!quiet) setUploadOk(force ? "Re-ingest queued." : "Ingest queued.");
-    } catch (e: any) {
-      if (!quiet) setUploadErr(e?.message || String(e));
-    } finally {
-      setIngestBusyById((prev) => ({ ...prev, [fileId]: false }));
-    }
-  }
-
-  async function fetchIngestStatus(fileId: string) {
-    setUploadErr("");
-
-    if (!tenantId.trim()) {
-      setUploadErr("Select an email account / tenant first.");
-      return;
-    }
-
-    setIngestBusyById((prev) => ({ ...prev, [fileId]: true }));
-    try {
-      const url = new URL(`/api/admin/kb/files/${fileId}/ingest-status`, window.location.origin);
-      url.searchParams.set("tenant_id", tenantId.trim());
-
-      const r = await fetch(url.toString(), { method: "GET" });
-      const t = await r.text();
-      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
-      const j = safeJsonParse<IngestStatusResp>(t) || {};
-      setIngestStatusById((prev) => ({ ...prev, [fileId]: j }));
-      setUploadOk(`Ingest status: ${j?.status || "unknown"}`);
-    } catch (e: any) {
-      setUploadErr(e?.message || String(e));
-    } finally {
-      setIngestBusyById((prev) => ({ ...prev, [fileId]: false }));
     }
   }
 
@@ -349,7 +385,7 @@ export function KBUploadPanel() {
     }
 
     try {
-      const url = new URL(`/api/admin/kb/files/${fileId}/download-token`, window.location.origin);
+      const url = new URL(`/api/admin/kb/files/${encodeURIComponent(fileId)}/download-token`, window.location.origin);
       url.searchParams.set("tenant_id", tenantId.trim());
 
       const r = await fetch(url.toString(), { method: "GET" });
@@ -357,9 +393,12 @@ export function KBUploadPanel() {
       if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
 
       const json = safeJsonParse<DownloadTokenResp>(t);
-      if (!json) throw new Error("Invalid JSON from /api/admin/kb/files/{id}/download-token");
+      if (!json?.download_url || !json?.download_token) throw new Error("Invalid download token response");
 
-      window.open(json.download_url, "_blank", "noopener,noreferrer");
+      const dl = new URL(json.download_url);
+      dl.searchParams.set("token", json.download_token);
+
+      window.open(dl.toString(), "_blank", "noopener,noreferrer");
     } catch (e: any) {
       setUploadErr(e?.message || String(e));
     }
@@ -378,7 +417,7 @@ export function KBUploadPanel() {
     if (!ok) return;
 
     try {
-      const url = new URL(`/api/admin/kb/files/${fileId}`, window.location.origin);
+      const url = new URL(`/api/admin/kb/files/${encodeURIComponent(fileId)}`, window.location.origin);
       url.searchParams.set("tenant_id", tenantId.trim());
 
       const r = await fetch(url.toString(), { method: "DELETE" });
@@ -386,52 +425,60 @@ export function KBUploadPanel() {
       if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
 
       setUploadOk("Deleted.");
+      setIngestByFile((p) => {
+        const copy = { ...p };
+        delete copy[fileId];
+        return copy;
+      });
       await refresh();
     } catch (e: any) {
       setUploadErr(e?.message || String(e));
     }
   }
 
-  // Init: restore last selection for debug UX, then load accounts
-  useEffect(() => {
+  async function runKbQuery() {
+    setChatBusy(true);
+    setChatErr("");
+    setChatResp(null);
+
     try {
-      const prevTenant = window.localStorage.getItem(LS_TENANT_KEY) || "";
-      if (prevTenant) setTenantId(prevTenant);
+      if (!tenantId.trim()) throw new Error("Select an email account / tenant first.");
+      if (!chatQuery.trim()) throw new Error("Enter a question first.");
 
-      const prevEmail = window.localStorage.getItem(LS_EMAIL_ACCOUNT_KEY) || "";
-      if (prevEmail) setSelectedEmailAccountId(prevEmail);
+      const r = await fetch("/api/admin/kb/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tenant_id: tenantId.trim(),
+          query: chatQuery.trim(),
+          mode: chatMode,
+          limit: Number.isFinite(chatLimit) ? chatLimit : 8,
+          include_policy: chatIncludePolicy,
+        }),
+      });
 
-      const prevAuto = window.localStorage.getItem(LS_AUTO_INGEST_KEY);
-      if (prevAuto === "0") setAutoIngestAfterUpload(false);
-      if (prevAuto === "1") setAutoIngestAfterUpload(true);
-    } catch {
-      // ignore
+      const t = await r.text();
+      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+
+      const json = safeJsonParse<KBQueryResp>(t);
+      if (!json) throw new Error("Invalid JSON from /api/admin/kb/query");
+      setChatResp(json);
+    } catch (e: any) {
+      setChatErr(e?.message || String(e));
+    } finally {
+      setChatBusy(false);
     }
+  }
+
+  // Load accounts once on mount
+  useEffect(() => {
     loadAccounts().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Persist for convenience
+  // On account selection, update tenant id
   useEffect(() => {
-    try {
-      if (tenantId.trim()) window.localStorage.setItem(LS_TENANT_KEY, tenantId.trim());
-    } catch {}
-  }, [tenantId]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(LS_AUTO_INGEST_KEY, autoIngestAfterUpload ? "1" : "0");
-    } catch {}
-  }, [autoIngestAfterUpload]);
-
-  useEffect(() => {
-    try {
-      if (selectedEmailAccountId) window.localStorage.setItem(LS_EMAIL_ACCOUNT_KEY, selectedEmailAccountId);
-    } catch {}
-  }, [selectedEmailAccountId]);
-
-  // When email selection changes, auto-fill tenantId if mapping exists.
-  useEffect(() => {
+    if (!selectedAccount) return;
     const tid = tenantFromAccount(selectedAccount);
     if (tid) setTenantId(tid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -444,6 +491,53 @@ export function KBUploadPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId]);
 
+  // Persist selection/tenant in localStorage
+  useEffect(() => {
+    try {
+      const prevTenant = window.localStorage.getItem(LS_TENANT_KEY) || "";
+      const prevEmail = window.localStorage.getItem(LS_EMAIL_ACCOUNT_KEY) || "";
+      if (!selectedEmailAccountId && prevEmail) setSelectedEmailAccountId(prevEmail);
+      if (!tenantId && prevTenant) setTenantId(prevTenant);
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (tenantId.trim()) window.localStorage.setItem(LS_TENANT_KEY, tenantId.trim());
+    } catch {}
+  }, [tenantId]);
+
+  useEffect(() => {
+    try {
+      if (selectedEmailAccountId) window.localStorage.setItem(LS_EMAIL_ACCOUNT_KEY, selectedEmailAccountId);
+    } catch {}
+  }, [selectedEmailAccountId]);
+
+  // Fetch ingest statuses whenever the file list changes
+  useEffect(() => {
+    if (!tenantId.trim()) return;
+    if (!items.length) return;
+
+    // Only fetch for rows we don't already have cached, or non-terminal statuses.
+    const shouldFetch = (id: string) => {
+      const st = ingestByFile[id];
+      if (!st) return true;
+      return ["queued", "running", "unknown"].includes(st.status);
+    };
+
+    const ids = items.map((x) => x.id).filter(shouldFetch);
+    if (!ids.length) return;
+
+    (async () => {
+      const batchSize = 4;
+      for (let i = 0; i < ids.length; i += batchSize) {
+        await Promise.all(ids.slice(i, i + batchSize).map((id) => fetchIngestStatus(id)));
+      }
+    })().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, tenantId]);
+
   return (
     <div className="panel" style={{ marginTop: 14 }}>
       <div className="panelTitle">KB Files</div>
@@ -451,199 +545,200 @@ export function KBUploadPanel() {
         Upload tenant KB documents (knowledge) and tenant policy/rules documents (policy). Uploads go WebUI → Control Plane.
       </div>
 
-      <div className="form" style={{ marginTop: 12 }}>
-        <div className="grid2">
-          <div className="field">
-            <label className="label">Email account</label>
-            <select
-              className="input"
-              value={selectedEmailAccountId}
-              onChange={(e) => setSelectedEmailAccountId(e.target.value)}
-              disabled={accountsLoading}
-            >
-              <option value="">{accountsLoading ? "(loading…)" : "(select email)"}</option>
-              {accounts.map((a) => {
-                const email = a.email_address || a.display_name || a.id;
-                const flags = [a.is_primary ? "primary" : "", !a.is_active ? "inactive" : ""].filter(Boolean).join(", ");
-                const tid = tenantFromAccount(a);
-                return (
-                  <option key={a.id} value={a.id}>
-                    {email}
-                    {a.provider_type ? ` (${a.provider_type})` : ""}
-                    {flags ? ` — ${flags}` : ""}
-                    {tid ? ` — tenant ${tid}` : " — (no tenant mapping)"}
-                  </option>
-                );
-              })}
-            </select>
-            <div className="help">
-              This maps to tenant_id for KB operations. If tenant mapping is missing, paste tenant_id manually on the right.
-            </div>
-            {accountsErr ? <div className="error" style={{ marginTop: 8 }}>{accountsErr}</div> : null}
-          </div>
-
-          <div className="field">
-            <label className="label">tenant_id</label>
-            <input
-              className="input mono"
-              value={tenantId}
-              onChange={(e) => setTenantId(e.target.value)}
-              placeholder="TENANT_UUID"
-              spellCheck={false}
-              autoCapitalize="none"
-              autoCorrect="off"
-            />
-            <div className="help">Required. All KB operations are tenant-scoped.</div>
-          </div>
+      <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+        <div>
+          <div className="label">Email account</div>
+          <select
+            value={selectedEmailAccountId}
+            onChange={(e) => setSelectedEmailAccountId(e.target.value)}
+            disabled={accountsLoading}
+            style={{ minWidth: 320 }}
+          >
+            <option value="">Select…</option>
+            {accounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.display_name || a.email_address || a.id}
+                {a.is_primary ? " (primary)" : ""}
+                {a.is_active === false ? " (inactive)" : ""}
+              </option>
+            ))}
+          </select>
+          {accountsErr ? <div className="help" style={{ color: "#b91c1c" }}>{accountsErr}</div> : null}
         </div>
 
-        <div className="grid2" style={{ alignItems: "end" }}>
-          <div className="field">
-            <label className="label">Kind</label>
-            <select className="input" value={kind} onChange={(e) => setKind(e.target.value as KBKind)}>
-              <option value="knowledge">knowledge</option>
-              <option value="policy">policy</option>
-            </select>
-            <div className="help">policy docs will later become high-priority instructions; knowledge docs become retrieval context.</div>
-          </div>
-
-          <div className="field">
-            <label className="label">Search</label>
-            <input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="filename contains…" />
-            <div className="help">Optional. Search is filename-based (q=).</div>
-          </div>
+        <div>
+          <div className="label">tenant_id</div>
+          <input
+            value={tenantId}
+            onChange={(e) => setTenantId(e.target.value)}
+            placeholder="tenant uuid"
+            style={{ minWidth: 320 }}
+          />
+          <div className="help">Must match the tenant_id used on Control Plane KB operations.</div>
         </div>
 
-        <div className="grid2" style={{ alignItems: "end" }}>
-          <div className="field">
-            <label className="label">File</label>
-            <input className="input" type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} disabled={uploadBusy} />
-            <div className="help">
-              {file ? (
-                <>
-                  Selected: <b>{file.name}</b> ({formatBytes(file.size)}) {file.type ? `• ${file.type}` : ""}
-                </>
-              ) : (
-                "Choose a file to upload."
-              )}
-            </div>
-          </div>
-
-          <div style={{ marginTop: 8 }}>
-            <label className="help" style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <input
-                type="checkbox"
-                checked={autoIngestAfterUpload}
-                onChange={(e) => setAutoIngestAfterUpload(e.target.checked)}
-              />
-              <span>
-                Auto-ingest after upload <span className="mono">(recommended)</span>
-              </span>
-            </label>
-            <div className="help" style={{ marginTop: 4 }}>
-              This queues <span className="mono">/admin/kb/files/&lt;id&gt;/ingest</span> after upload so KB Chat can answer without extra manual steps.
-            </div>
-          </div>
-
-          <div className="actions">
-            <button type="button" className="btnPrimary" onClick={upload} disabled={!canQuery || uploadBusy || !file}>
-              {uploadBusy ? "Uploading…" : "Upload"}
-            </button>
-
-            <button type="button" className="btnSecondary" onClick={refresh} disabled={!canQuery || listBusy}>
-              {listBusy ? "Refreshing…" : "Refresh"}
-            </button>
-
-            <button type="button" className="btnSecondary" onClick={loadAccounts} disabled={accountsLoading} style={{ marginLeft: 8 }}>
-              {accountsLoading ? "Loading…" : "Reload"}
-            </button>
-          </div>
+        <div>
+          <div className="label">kind</div>
+          <select value={kind} onChange={(e) => setKind(e.target.value as KBKind)} disabled={!canQuery}>
+            <option value="knowledge">knowledge</option>
+            <option value="policy">policy</option>
+          </select>
         </div>
 
-        {(uploadErr || listErr || uploadOk) && (
-          <div style={{ marginTop: 10 }}>
-            {uploadErr ? <div className="error">{uploadErr}</div> : null}
-            {listErr ? <div className="error" style={{ marginTop: 8 }}>{listErr}</div> : null}
-            {uploadOk ? <div className="success" style={{ marginTop: 8 }}>{uploadOk}</div> : null}
-          </div>
-        )}
+        <div>
+          <div className="label">search</div>
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="filename contains…" disabled={!canQuery} />
+        </div>
 
-        <div style={{ marginTop: 8, overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div style={{ alignSelf: "flex-end", display: "flex", gap: 8, alignItems: "center" }}>
+          <button type="button" className="btnPrimary" onClick={upload} disabled={!canQuery || uploadBusy || !file}>
+            {uploadBusy ? "Uploading…" : "Upload"}
+          </button>
+
+          <button type="button" className="btnSecondary" onClick={refresh} disabled={!canQuery || listBusy}>
+            {listBusy ? "Refreshing…" : "Refresh"}
+          </button>
+
+          <button type="button" className="btnSecondary" onClick={refreshAllIngestStatuses} disabled={!canQuery || !items.length}>
+            Refresh ingest statuses
+          </button>
+
+          <button type="button" className="btnSecondary" onClick={loadAccounts} disabled={accountsLoading} style={{ marginLeft: 8 }}>
+            Reload accounts
+          </button>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+        <div>
+          <div className="label">Select file</div>
+          <input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+          <div className="help">Supported: .txt, .pdf, .docx (depends on Control Plane worker dependencies).</div>
+        </div>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 18 }}>
+          <input
+            type="checkbox"
+            checked={autoIngestAfterUpload}
+            onChange={(e) => setAutoIngestAfterUpload(e.target.checked)}
+          />
+          Auto-ingest after upload
+        </label>
+      </div>
+
+      {uploadErr ? (
+        <div className="alert" style={{ marginTop: 12 }}>
+          <div className="alertTitle">Error</div>
+          <div className="alertBody">{uploadErr}</div>
+        </div>
+      ) : null}
+
+      {uploadOk ? (
+        <div className="ok" style={{ marginTop: 12 }}>
+          {uploadOk}
+        </div>
+      ) : null}
+
+      <div style={{ marginTop: 14 }}>
+        <div className="label">Files</div>
+        {listErr ? <div className="help" style={{ color: "#b91c1c" }}>{listErr}</div> : null}
+
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 8 }}>
             <thead>
               <tr>
                 <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Filename</th>
                 <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Kind</th>
-                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Status</th>
+                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>File Status</th>
+                <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Ingest</th>
                 <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Size</th>
                 <th style={{ textAlign: "left", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Created</th>
                 <th style={{ textAlign: "right", padding: 6, borderBottom: "1px solid rgba(15,23,42,0.12)" }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {items.map((it) => (
-                <tr key={it.id}>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>
-                    <div style={{ fontWeight: 600 }}>{it.filename}</div>
-                    <div className="help" style={{ marginTop: 2 }}>
-                      {it.content_type} {it.sha256 ? `• sha256 ${it.sha256.slice(0, 10)}…` : ""}
-                    </div>
-                    <div className="help" style={{ marginTop: 2, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                      <span>
-                        File ID: <span className="mono">{it.id}</span>
-                      </span>
-                      <button type="button" className="btnSecondary" onClick={() => copyValue("file id", it.id)}>
-                        Copy ID
-                      </button>
-                    </div>
-                  </td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.kind}</td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>
-                    <div>{it.status}</div>
-                    <div className="help" style={{ marginTop: 3 }}>
-                      ingest: <span className="mono">{ingestStatusById[it.id]?.status || "—"}</span>
-                    </div>
-                    {ingestStatusById[it.id]?.job?.error ? (
-                      <div className="help" style={{ marginTop: 3 }}>
-                        error: {String(ingestStatusById[it.id]?.job?.error || "").slice(0, 120)}
+              {items.map((it) => {
+                const ingest = ingestByFile[it.id];
+                const ingestStatus = ingest?.status || "";
+                const ingestErr = ingest?.job?.error ? shortErr(String(ingest.job.error)) : "";
+                const ingestBusy = !!ingestBusyByFile[it.id];
+
+                return (
+                  <tr key={it.id}>
+                    <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>
+                      <div style={{ fontWeight: 600 }}>{it.filename}</div>
+                      <div className="help" style={{ marginTop: 2 }}>
+                        {it.content_type} {it.sha256 ? `• sha256 ${it.sha256.slice(0, 10)}…` : ""}
                       </div>
-                    ) : null}
-                  </td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{formatBytes(it.size_bytes)}</td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.created_at ? new Date(it.created_at).toLocaleString() : ""}</td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)", textAlign: "right" }}>
-                    <button
-                      type="button"
-                      className="btnSecondary"
-                      onClick={() => enqueueIngest(it.id, false)}
-                      disabled={!tenantId.trim() || !!ingestBusyById[it.id]}
-                      style={{ marginRight: 8 }}
-                    >
-                      {ingestBusyById[it.id] ? "Working…" : "Ingest"}
-                    </button>
+                      <div className="help" style={{ marginTop: 4, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <span>
+                          File ID: <span className="mono">{it.id}</span>
+                        </span>
+                        <button type="button" className="btnSecondary" onClick={() => copyValue("file id", it.id)}>
+                          Copy ID
+                        </button>
+                      </div>
+                    </td>
 
-                    <button
-                      type="button"
-                      className="btnSecondary"
-                      onClick={() => fetchIngestStatus(it.id)}
-                      disabled={!tenantId.trim() || !!ingestBusyById[it.id]}
-                      style={{ marginRight: 8 }}
-                    >
-                      Status
-                    </button>
+                    <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.kind}</td>
 
-                    <button type="button" className="btnSecondary" onClick={() => requestDownload(it.id)} style={{ marginRight: 8 }}>
-                      Download
-                    </button>
-                    <button type="button" className="btnSecondary" onClick={() => deleteFile(it.id)}>
-                      Delete
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                    <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.status}</td>
+
+                    <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>
+                      <div style={{ fontWeight: 600 }}>{ingestStatus || "—"}</div>
+                      {ingestErr ? <div className="help" style={{ color: "#b91c1c" }}>{ingestErr}</div> : null}
+
+                      <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          className="btnSecondary"
+                          onClick={() => enqueueIngest(it.id, false)}
+                          disabled={!canQuery || ingestBusy}
+                        >
+                          Ingest
+                        </button>
+
+                        <button
+                          type="button"
+                          className="btnSecondary"
+                          onClick={() => enqueueIngest(it.id, true)}
+                          disabled={!canQuery || ingestBusy}
+                        >
+                          Force
+                        </button>
+
+                        <button
+                          type="button"
+                          className="btnSecondary"
+                          onClick={() => fetchIngestStatus(it.id)}
+                          disabled={!canQuery || ingestBusy}
+                        >
+                          Status
+                        </button>
+                      </div>
+                    </td>
+
+                    <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{formatBytes(it.size_bytes)}</td>
+
+                    <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>
+                      {it.created_at ? new Date(it.created_at).toLocaleString() : ""}
+                    </td>
+
+                    <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)", textAlign: "right" }}>
+                      <button type="button" className="btnSecondary" onClick={() => requestDownload(it.id)} style={{ marginRight: 8 }}>
+                        Download
+                      </button>
+                      <button type="button" className="btnSecondary" onClick={() => deleteFile(it.id)}>
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+
               {!items.length ? (
                 <tr>
-                  <td colSpan={6} style={{ padding: 10, opacity: 0.75 }}>
+                  <td colSpan={7} style={{ padding: 10, opacity: 0.75 }}>
                     {tenantId.trim() ? "No KB files yet." : "Select an email account (or enter a tenant_id) to list KB files."}
                   </td>
                 </tr>
@@ -653,7 +748,112 @@ export function KBUploadPanel() {
         </div>
       </div>
 
-      <KBChatPanel tenantId={tenantId} />
+      <div style={{ marginTop: 18 }}>
+        <div className="panelTitle" style={{ fontSize: 16 }}>KB Q&A (Admin test)</div>
+        <div className="panelSub">
+          This is a quick way to validate retrieval and policy behavior after ingestion. For best results, upload + ingest a <b>knowledge</b> doc and optionally a <b>policy</b> doc.
+        </div>
+
+        <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+          <div style={{ flex: 1, minWidth: 320 }}>
+            <div className="label">Question</div>
+            <input
+              value={chatQuery}
+              onChange={(e) => setChatQuery(e.target.value)}
+              placeholder="e.g., What are your business hours?"
+              disabled={!canQuery}
+              style={{ width: "100%" }}
+            />
+          </div>
+
+          <div>
+            <div className="label">mode</div>
+            <select value={chatMode} onChange={(e) => setChatMode(e.target.value as KBQueryMode)} disabled={!canQuery}>
+              <option value="answer">answer</option>
+              <option value="retrieve">retrieve</option>
+            </select>
+          </div>
+
+          <div>
+            <div className="label">limit</div>
+            <input
+              type="number"
+              value={chatLimit}
+              onChange={(e) => setChatLimit(parseInt(e.target.value || "8", 10))}
+              min={1}
+              max={20}
+              disabled={!canQuery}
+              style={{ width: 90 }}
+            />
+          </div>
+
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 18 }}>
+            <input type="checkbox" checked={chatIncludePolicy} onChange={(e) => setChatIncludePolicy(e.target.checked)} />
+            include policy
+          </label>
+
+          <div style={{ alignSelf: "flex-end" }}>
+            <button type="button" className="btnPrimary" onClick={runKbQuery} disabled={!canQuery || chatBusy}>
+              {chatBusy ? "Running…" : "Ask"}
+            </button>
+          </div>
+        </div>
+
+        {chatErr ? (
+          <div className="alert" style={{ marginTop: 12 }}>
+            <div className="alertTitle">KB query error</div>
+            <div className="alertBody">{chatErr}</div>
+          </div>
+        ) : null}
+
+        {chatResp ? (
+          <div style={{ marginTop: 12 }}>
+            <div className="help">
+              strategy: <span className="mono">{chatResp.retrieval_strategy || "—"}</span>
+              {" • "}
+              context_chars: <span className="mono">{String(chatResp.context_chars ?? "—")}</span>
+              {" • "}
+              policy_chars: <span className="mono">{String(chatResp.policy_chars ?? "—")}</span>
+              {" • "}
+              model: <span className="mono">{chatResp.model || "—"}</span>
+              {" • "}
+              latency_ms: <span className="mono">{String(chatResp.latency_ms ?? "—")}</span>
+            </div>
+
+            {chatResp.answer ? (
+              <div style={{ marginTop: 10, padding: 12, borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", background: "rgba(255,255,255,0.7)" }}>
+                <div className="label">Answer</div>
+                <div style={{ whiteSpace: "pre-wrap" }}>{chatResp.answer}</div>
+              </div>
+            ) : null}
+
+            <div style={{ marginTop: 12 }}>
+              <div className="label">Sources</div>
+              {chatResp.sources?.length ? (
+                <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
+                  {chatResp.sources.map((s, idx) => (
+                    <div key={`${s.file_id}:${s.chunk_index}:${idx}`} style={{ padding: 12, borderRadius: 12, border: "1px solid rgba(15,23,42,0.10)", background: "rgba(255,255,255,0.65)" }}>
+                      <div style={{ fontWeight: 700 }}>
+                        {s.filename} <span className="help">• {s.kind} • chunk {s.chunk_index}</span>
+                      </div>
+                      <div className="help" style={{ marginTop: 2 }}>
+                        {s.content_type} {s.score !== undefined && s.score !== null ? `• score ${s.score.toFixed(3)}` : ""}
+                      </div>
+                      <div style={{ marginTop: 8, whiteSpace: "pre-wrap", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 12 }}>
+                        {s.snippet}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="help" style={{ marginTop: 8 }}>
+                  No sources returned. This usually means: (1) files were uploaded but not ingested, or (2) the tenant_id is wrong.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
