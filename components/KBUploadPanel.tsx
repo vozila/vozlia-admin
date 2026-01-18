@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { KBChatPanel } from "./KBChatPanel";
 
 type KBKind = "knowledge" | "policy";
 
@@ -41,6 +42,32 @@ type UploadTokenResp = { upload_url: string; upload_token: string; expires_in_s:
 
 type DownloadTokenResp = { download_url: string; download_token: string; expires_in_s: number };
 
+type IngestEnqueueResp = {
+  ok?: boolean;
+  job?: {
+    id?: string;
+    status?: string;
+    error?: string | null;
+    created_at?: string | null;
+    started_at?: string | null;
+    finished_at?: string | null;
+  };
+};
+
+type IngestStatusResp = {
+  ok?: boolean;
+  status?: string;
+  job?: {
+    id?: string;
+    status?: string;
+    error?: string | null;
+    created_at?: string | null;
+    started_at?: string | null;
+    finished_at?: string | null;
+  };
+};
+
+
 const DEFAULT_LIMIT = 50;
 
 function formatBytes(n: number): string {
@@ -66,6 +93,7 @@ function safeJsonParse<T>(text: string): T | null {
 
 const LS_TENANT_KEY = "vozlia.kb.tenant_id";
 const LS_EMAIL_ACCOUNT_KEY = "vozlia.kb.email_account_id";
+const LS_AUTO_INGEST_KEY = "vozlia.kb.auto_ingest";
 
 export function KBUploadPanel() {
   const [accounts, setAccounts] = useState<EmailAccount[]>([]);
@@ -79,6 +107,12 @@ export function KBUploadPanel() {
 
   const [kind, setKind] = useState<KBKind>("knowledge");
   const [q, setQ] = useState<string>("");
+
+  const [autoIngestAfterUpload, setAutoIngestAfterUpload] = useState<boolean>(true);
+
+  const [ingestBusyById, setIngestBusyById] = useState<Record<string, boolean>>({});
+  const [ingestStatusById, setIngestStatusById] = useState<Record<string, IngestStatusResp | null>>({});
+
 
   const [items, setItems] = useState<KBFileRow[]>([]);
   const [listBusy, setListBusy] = useState(false);
@@ -227,13 +261,81 @@ export function KBUploadPanel() {
       const t = await r.text();
       if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
 
-      setUploadOk("Uploaded.");
+      const upJson = safeJsonParse<any>(t) || {};
+      const uploadedFileId: string =
+        (upJson?.file?.id || upJson?.file_id || upJson?.id || "").toString().trim();
+
+      // Auto-ingest is strongly recommended so KB Chat can answer immediately.
+      if (autoIngestAfterUpload && uploadedFileId) {
+        await enqueueIngest(uploadedFileId, false, true);
+        setUploadOk("Uploaded. Ingest queued.");
+      } else {
+        setUploadOk("Uploaded.");
+      }
+
       setFile(null);
       await refresh();
     } catch (e: any) {
       setUploadErr(e?.message || String(e));
     } finally {
       setUploadBusy(false);
+    }
+  }
+
+  async function enqueueIngest(fileId: string, force: boolean, quiet?: boolean) {
+    if (!tenantId.trim()) {
+      if (!quiet) setUploadErr("Select an email account / tenant first.");
+      return;
+    }
+
+    setUploadErr("");
+    if (!quiet) setUploadOk("");
+
+    setIngestBusyById((prev) => ({ ...prev, [fileId]: true }));
+    try {
+      const r = await fetch(`/api/admin/kb/files/${fileId}/ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tenant_id: tenantId.trim(), force: !!force }),
+      });
+
+      const t = await r.text();
+      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+      const j = safeJsonParse<IngestEnqueueResp>(t) || {};
+      // optimistic update
+      setIngestStatusById((prev) => ({ ...prev, [fileId]: { ok: true, status: j?.job?.status || "queued", job: j?.job } }));
+
+      if (!quiet) setUploadOk(force ? "Re-ingest queued." : "Ingest queued.");
+    } catch (e: any) {
+      if (!quiet) setUploadErr(e?.message || String(e));
+    } finally {
+      setIngestBusyById((prev) => ({ ...prev, [fileId]: false }));
+    }
+  }
+
+  async function fetchIngestStatus(fileId: string) {
+    setUploadErr("");
+
+    if (!tenantId.trim()) {
+      setUploadErr("Select an email account / tenant first.");
+      return;
+    }
+
+    setIngestBusyById((prev) => ({ ...prev, [fileId]: true }));
+    try {
+      const url = new URL(`/api/admin/kb/files/${fileId}/ingest-status`, window.location.origin);
+      url.searchParams.set("tenant_id", tenantId.trim());
+
+      const r = await fetch(url.toString(), { method: "GET" });
+      const t = await r.text();
+      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+      const j = safeJsonParse<IngestStatusResp>(t) || {};
+      setIngestStatusById((prev) => ({ ...prev, [fileId]: j }));
+      setUploadOk(`Ingest status: ${j?.status || "unknown"}`);
+    } catch (e: any) {
+      setUploadErr(e?.message || String(e));
+    } finally {
+      setIngestBusyById((prev) => ({ ...prev, [fileId]: false }));
     }
   }
 
@@ -298,6 +400,10 @@ export function KBUploadPanel() {
 
       const prevEmail = window.localStorage.getItem(LS_EMAIL_ACCOUNT_KEY) || "";
       if (prevEmail) setSelectedEmailAccountId(prevEmail);
+
+      const prevAuto = window.localStorage.getItem(LS_AUTO_INGEST_KEY);
+      if (prevAuto === "0") setAutoIngestAfterUpload(false);
+      if (prevAuto === "1") setAutoIngestAfterUpload(true);
     } catch {
       // ignore
     }
@@ -311,6 +417,12 @@ export function KBUploadPanel() {
       if (tenantId.trim()) window.localStorage.setItem(LS_TENANT_KEY, tenantId.trim());
     } catch {}
   }, [tenantId]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LS_AUTO_INGEST_KEY, autoIngestAfterUpload ? "1" : "0");
+    } catch {}
+  }, [autoIngestAfterUpload]);
 
   useEffect(() => {
     try {
@@ -417,6 +529,22 @@ export function KBUploadPanel() {
             </div>
           </div>
 
+          <div style={{ marginTop: 8 }}>
+            <label className="help" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                type="checkbox"
+                checked={autoIngestAfterUpload}
+                onChange={(e) => setAutoIngestAfterUpload(e.target.checked)}
+              />
+              <span>
+                Auto-ingest after upload <span className="mono">(recommended)</span>
+              </span>
+            </label>
+            <div className="help" style={{ marginTop: 4 }}>
+              This queues <span className="mono">/admin/kb/files/&lt;id&gt;/ingest</span> after upload so KB Chat can answer without extra manual steps.
+            </div>
+          </div>
+
           <div className="actions">
             <button type="button" className="btnPrimary" onClick={upload} disabled={!canQuery || uploadBusy || !file}>
               {uploadBusy ? "Uploading…" : "Upload"}
@@ -470,10 +598,40 @@ export function KBUploadPanel() {
                     </div>
                   </td>
                   <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.kind}</td>
-                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.status}</td>
+                  <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>
+                    <div>{it.status}</div>
+                    <div className="help" style={{ marginTop: 3 }}>
+                      ingest: <span className="mono">{ingestStatusById[it.id]?.status || "—"}</span>
+                    </div>
+                    {ingestStatusById[it.id]?.job?.error ? (
+                      <div className="help" style={{ marginTop: 3 }}>
+                        error: {String(ingestStatusById[it.id]?.job?.error || "").slice(0, 120)}
+                      </div>
+                    ) : null}
+                  </td>
                   <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{formatBytes(it.size_bytes)}</td>
                   <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)" }}>{it.created_at ? new Date(it.created_at).toLocaleString() : ""}</td>
                   <td style={{ padding: 6, borderBottom: "1px solid rgba(15,23,42,0.08)", textAlign: "right" }}>
+                    <button
+                      type="button"
+                      className="btnSecondary"
+                      onClick={() => enqueueIngest(it.id, false)}
+                      disabled={!tenantId.trim() || !!ingestBusyById[it.id]}
+                      style={{ marginRight: 8 }}
+                    >
+                      {ingestBusyById[it.id] ? "Working…" : "Ingest"}
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btnSecondary"
+                      onClick={() => fetchIngestStatus(it.id)}
+                      disabled={!tenantId.trim() || !!ingestBusyById[it.id]}
+                      style={{ marginRight: 8 }}
+                    >
+                      Status
+                    </button>
+
                     <button type="button" className="btnSecondary" onClick={() => requestDownload(it.id)} style={{ marginRight: 8 }}>
                       Download
                     </button>
@@ -494,6 +652,8 @@ export function KBUploadPanel() {
           </table>
         </div>
       </div>
+
+      <KBChatPanel tenantId={tenantId} />
     </div>
   );
 }
