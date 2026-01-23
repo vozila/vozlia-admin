@@ -70,6 +70,18 @@ type Template = {
 };
 // ---- end local types/constants ----
 
+// Default prompt shown for Investment Reporting if no custom prompt is set.
+// This is UI-only; the backend may still apply its own defaults.
+const DEFAULT_INVESTMENT_REPORTING_LLM_PROMPT = `You are Vozlia’s investment reporting assistant.
+
+When asked for a stock report:
+- Provide the latest price, absolute change, and percent change (if available).
+- Summarize any material news drivers briefly (1–3 bullets).
+- Keep the response concise and voice-friendly.
+
+Important: This is informational only and not financial advice.`;
+
+
 export default function AdminPage() {
   const { data: session } = useSession();
   const primaryEmail = (session?.user?.email as string | undefined) || "";
