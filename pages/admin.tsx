@@ -1,250 +1,11 @@
 import type { GetServerSidePropsContext } from "next";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSession, signIn, signOut } from "next-auth/react";
 import { RenderLogsPanel } from "../components/RenderLogsPanel";
 import { KBUploadPanel } from "../components/KBUploadPanel";
 import AgentLongTermMemoryTable from "../components/AgentLongTermMemoryTable";
-
-type EmailAccount = {
-  id: string;
-  provider_type: string;
-  oauth_provider?: string | null;
-  email_address?: string | null;
-  display_name?: string | null;
-  is_primary: boolean;
-  is_active: boolean;
-};
-
-type SkillKey = "gmail_summaries" | "sms" | "calendar" | "web_search" | "weather" | "investment_reporting";
-
-const SKILL_ID_BY_KEY: Record<SkillKey, string> = {
-  gmail_summaries: "gmail_summary",
-  sms: "sms",
-  calendar: "calendar",
-  web_search: "web_search",
-  weather: "weather",
-  investment_reporting: "investment_reporting",
-};
-
-const KEY_BY_SKILL_ID: Record<string, SkillKey> = Object.fromEntries(
-  Object.entries(SKILL_ID_BY_KEY).map(([k, sid]) => [sid, k as SkillKey])
-) as Record<string, SkillKey>;
-
-const DEFAULT_INVESTMENT_REPORTING_LLM_PROMPT = `You are Vozlia, a concise voice assistant delivering a stock report.
-For each ticker, speak in this order:
-1) Current price
-2) Previous close
-3) Percent change (vs previous close)
-4) 1–3 key news items from the last 24 hours (headline-level summary)
-5) Any analyst upgrades/downgrades or new price targets if available.
-Keep each ticker under 20 seconds. After each ticker, say: "Say next to continue, or stop to end."
-If data is missing, say "not available" and continue. Do not ask follow-up questions.`;
-
-
-type TemplateItem =
-  | { kind: "skill"; key: SkillKey }
-  | { kind: "playbook"; id: string };
-
-type Playbook = {
-  id: string;
-  name: string;
-  enabled: boolean;
-  steps: SkillKey[];
-};
-
-type Template = {
-  id: string;
-  name: string;
-  enabled: boolean;
-  sequence: TemplateItem[];
-};
-
-type DragPayload =
-  | { type: "skill"; key: SkillKey }
-  | { type: "playbook"; id: string };
-
-function safeParseDragPayload(raw: string): DragPayload | null {
-  try {
-    const obj = JSON.parse(raw) as Record<string, unknown>;
-    const type = obj["type"];
-    if (type === "skill") {
-      const key = obj["key"];
-      if (typeof key === "string") {
-        // Narrow to SkillKey
-        const allowed: SkillKey[] = ["gmail_summaries", "sms", "calendar", "web_search", "weather", "investment_reporting"];
-        if (allowed.includes(key as SkillKey)) return { type: "skill", key: key as SkillKey };
-      }
-      return null;
-    }
-    if (type === "playbook") {
-      const id = obj["id"];
-      if (typeof id === "string" && id.length > 0) return { type: "playbook", id };
-      return null;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function SectionRow({
-  title,
-  subtitle,
-  open,
-  onToggle,
-  children,
-  rightSlot,
-}: {
-  title: string;
-  subtitle: string;
-  open: boolean;
-  onToggle: () => void;
-  children: ReactNode;
-  rightSlot?: ReactNode;
-}) {
-  return (
-    <div className="sectionShell">
-      <button type="button" className="sectionHeader" onClick={onToggle}>
-        <span className="plus">{open ? "–" : "+"}</span>
-        <div className="sectionText">
-          <div className="sectionTitle">{title}</div>
-          <div className="sectionSub">{subtitle}</div>
-        </div>
-        {rightSlot ? <div className="sectionRight">{rightSlot}</div> : null}
-      </button>
-      {open ? <div className="sectionBody">{children}</div> : null}
-    </div>
-  );
-}
-
-function Switch({
-  checked,
-  onChange,
-  label,
-  helper,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  label: string;
-  helper?: string;
-}) {
-  return (
-    <div className="switchRow">
-      <div className="switchText">
-        <div className="switchLabel">{label}</div>
-        {helper ? <div className="switchHelper">{helper}</div> : null}
-      </div>
-      <button type="button" className={`switch ${checked ? "on" : "off"}`} onClick={() => onChange(!checked)} aria-pressed={checked}>
-        <span className="knob" />
-      </button>
-    </div>
-  );
-}
-
-function TextField({
-  label,
-  value,
-  onChange,
-  placeholder,
-  helper,
-  multiline,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  helper?: string;
-  multiline?: boolean;
-}) {
-  return (
-    <div className="field">
-      <div className="fieldLabel">{label}</div>
-      {helper ? <div className="fieldHelper">{helper}</div> : null}
-      {multiline ? (
-        <textarea className="input" rows={4} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
-      ) : (
-        <input className="input" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
-      )}
-    </div>
-  );
-}
-
-function SkillTile({
-  title,
-  desc,
-  enabled,
-  active,
-  onClick,
-  draggableKey,
-}: {
-  title: string;
-  desc: string;
-  enabled: boolean;
-  active: boolean;
-  onClick: () => void;
-  draggableKey: SkillKey;
-}) {
-  return (
-    <button
-      type="button"
-      className={`tile ${active ? "active" : ""}`}
-      onClick={onClick}
-      draggable
-      onDragStart={(e) => {
-        const payload: DragPayload = { type: "skill", key: draggableKey };
-        e.dataTransfer.setData("application/json", JSON.stringify(payload));
-        e.dataTransfer.effectAllowed = "copyMove";
-      }}
-    >
-      <div className="tileTop">
-        <div className="tileTitle">{title}</div>
-        <span className={`pill ${enabled ? "pillOn" : "pillOff"}`}>{enabled ? "Enabled" : "Disabled"}</span>
-      </div>
-      <div className="tileDesc">{desc}</div>
-    </button>
-  );
-}
-
-function DropZone({
-  title,
-  subtitle,
-  onDropPayload,
-  children,
-}: {
-  title: string;
-  subtitle: string;
-  onDropPayload: (p: DragPayload) => void;
-  children: ReactNode;
-}) {
-  const [over, setOver] = useState(false);
-  return (
-    <div
-      className={`dropZone ${over ? "over" : ""}`}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setOver(true);
-      }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setOver(false);
-        const raw = e.dataTransfer.getData("application/json");
-        const payload = safeParseDragPayload(raw);
-        if (payload) onDropPayload(payload);
-      }}
-    >
-      <div className="dropHead">
-        <div>
-          <div className="dropTitle">{title}</div>
-          <div className="dropSub">{subtitle}</div>
-        </div>
-      </div>
-      <div className="dropBody">{children}</div>
-    </div>
-  );
-}
-
-export default function AdminPage() {
+import WebSearchMvpPanel from "../components/WebSearchMvpPanel";
+import { SectionRow, Switch, TextField, SkillTile, DropZone, export default function AdminPage() {
   const { data: session } = useSession();
   const primaryEmail = (session?.user?.email as string | undefined) || "";
 
@@ -265,6 +26,7 @@ export default function AdminPage() {
     logging: false,
     email: false,
     renderLogs: false,
+    websearchMvp: false,
   });
 
   const [activeSkill, setActiveSkill] = useState<SkillKey | null>(null);
@@ -758,14 +520,6 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                     />
                   ) : null}
 
-                  {activeSkill === "investment_reporting" ? (
-                    <div className="actions" style={{ marginTop: 12 }}>
-                      <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
-                        {saving ? "Saving…" : "Save Investment Reporting"}
-                      </button>
-                    </div>
-                  ) : null}
-
 
                   {activeSkill === "gmail_summaries" ? (
                     <div className="panelInset">
@@ -813,18 +567,27 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                             })}
                           </div>
                         </div>
-
-                        <div className="actions">
-                          <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
-                            {saving ? "Saving…" : "Save Gmail Settings"}
-                          </button>
-                        </div>
                       </div>
                     </div>
                   ) : null}
+                <div className="actions" style={{ marginTop: 12 }}>
+                  <button type="button" className="btnPrimary" disabled={saving} onClick={saveWiredSettings}>
+                    {saving ? "Saving…" : "Save Skill Settings"}
+                  </button>
+                </div>
+
                 </div>
               </div>
             ) : null}
+          </SectionRow>
+
+          <SectionRow
+            title="Web Search Skills (MVP)"
+            subtitle="Run a live web search, save it as a skill, schedule daily delivery, and test notify channels."
+            open={open.websearchMvp}
+            onToggle={() => setOpen((p) => ({ ...p, websearchMvp: !p.websearchMvp }))}
+          >
+            <WebSearchMvpPanel />
           </SectionRow>
 
           <SectionRow
