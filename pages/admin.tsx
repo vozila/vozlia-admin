@@ -6,6 +6,7 @@ import { KBUploadPanel } from "../components/KBUploadPanel";
 import AgentLongTermMemoryTable from "../components/AgentLongTermMemoryTable";
 import WebSearchMvpPanel from "../components/WebSearchMvpPanel";
 import { SectionRow, Switch, TextField, SkillTile, DropZone } from "../components/admin/AdminUi";
+import type { DragPayload } from "../components/admin/AdminUi";
 
 
 // ---- Local types/constants for AdminPage (kept in-file to avoid cross-file coupling) ----
