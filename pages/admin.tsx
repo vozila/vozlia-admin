@@ -5,7 +5,72 @@ import { RenderLogsPanel } from "../components/RenderLogsPanel";
 import { KBUploadPanel } from "../components/KBUploadPanel";
 import AgentLongTermMemoryTable from "../components/AgentLongTermMemoryTable";
 import WebSearchMvpPanel from "../components/WebSearchMvpPanel";
-import { SectionRow, Switch, TextField, SkillTile, DropZone, export default function AdminPage() {
+import { SectionRow, Switch, TextField, SkillTile, DropZone } from "../components/admin/AdminUi";
+
+
+// ---- Local types/constants for AdminPage (kept in-file to avoid cross-file coupling) ----
+// NOTE: These were missing in an earlier patch and are required for TypeScript builds.
+
+type SkillKey =
+  | "gmail_summaries"
+  | "sms"
+  | "calendar"
+  | "web_search"
+  | "weather"
+  | "investment_reporting";
+
+// Skill IDs as used by the Control Plane / backend settings payload (`skills_config` keys).
+const SKILL_ID_BY_KEY: Record<SkillKey, string> = {
+  gmail_summaries: "gmail_summary",
+  sms: "sms",
+  calendar: "calendar",
+  web_search: "web_search",
+  weather: "weather",
+  investment_reporting: "investment_reporting",
+};
+
+const KEY_BY_SKILL_ID: Record<string, SkillKey> = Object.fromEntries(
+  Object.entries(SKILL_ID_BY_KEY).map(([k, v]) => [v, k])
+) as Record<string, SkillKey>;
+
+type EmailAccount = {
+  id: string;
+  provider_type: string;
+  oauth_provider?: string | null;
+  email_address?: string | null;
+  display_name?: string | null;
+  is_primary: boolean;
+  is_active: boolean;
+
+  // Depending on Control Plane schema, tenant mapping may appear in one of these fields.
+  tenant_id?: string | null;
+  tenantId?: string | null;
+
+  // In some deployments, user_id is the tenant UUID.
+  user_id?: string | null;
+  userId?: string | null;
+};
+
+type Playbook = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  steps: SkillKey[];
+};
+
+type TemplateItem =
+  | { kind: "playbook"; id: string }
+  | { kind: "skill"; key: SkillKey };
+
+type Template = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  sequence: TemplateItem[];
+};
+// ---- end local types/constants ----
+
+export default function AdminPage() {
   const { data: session } = useSession();
   const primaryEmail = (session?.user?.email as string | undefined) || "";
 
