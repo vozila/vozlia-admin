@@ -503,7 +503,8 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                   subtitle="Drop a skill tile here to move it to the top."
                   onDropPayload={(p) => {
                     if (p.type !== "skill") return;
-                    setGreetingPriority((cur) => [p.key, ...cur.filter((k) => k !== p.key)]);
+                    const key = p.key as SkillKey;
+                    setGreetingPriority((cur) => [key, ...cur.filter((k) => k !== key)]);
                   }}
                 >
                   <div className="list">
@@ -721,11 +722,12 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                   subtitle="Drop a skill tile here to append it."
                   onDropPayload={(p) => {
                     if (p.type !== "skill") return;
+                    const key = p.key as SkillKey;
                     setPlaybooks((cur) =>
                       cur.map((pb) => {
                         if (pb.id !== selectedPlaybookId) return pb;
-                        const exists = pb.steps.includes(p.key);
-                        return exists ? pb : { ...pb, steps: [...pb.steps, p.key] };
+                        const exists = pb.steps.includes(key);
+                        return exists ? pb : { ...pb, steps: [...pb.steps, key] };
                       })
                     );
                   }}
@@ -803,7 +805,9 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                   subtitle="Drop a playbook or skill to append it."
                   onDropPayload={(p) => {
                     const item: TemplateItem | null =
-                      p.type === "playbook" ? { kind: "playbook", id: p.id } : { kind: "skill", key: p.key };
+                      p.type === "playbook"
+                        ? { kind: "playbook", id: p.id }
+                        : { kind: "skill", key: p.key as SkillKey };
 
                     if (!item) return;
 
