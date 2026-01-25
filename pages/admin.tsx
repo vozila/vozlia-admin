@@ -19,6 +19,7 @@ type EmailAccount = {
   provider_type: string;
   email_address?: string | null;
   display_name?: string | null;
+  is_primary?: boolean;
   is_active: boolean;
 };
 
