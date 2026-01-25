@@ -21,7 +21,7 @@ type WebSearchSkill = {
   skill_key: string;
   name: string;
   query: string;
-  triggers?: string[];
+  triggers: string[];
   enabled: boolean;
 };
 
@@ -29,66 +29,94 @@ type WebSearchSchedule = {
   id: string;
   web_search_skill_id: string;
   enabled: boolean;
-  cadence: string;
-  time_of_day: string;
+  cadence: string; // "daily" (MVP)
+  time_of_day: string; // "HH:MM"
   timezone: string;
-  channel: string;
+  channel: string; // "email" | "sms" (MVP)
   destination: string;
   next_run_at?: string | null;
   last_run_at?: string | null;
 };
 
+type ChatRole = "user" | "assistant" | "system";
 type ChatMsg = {
-  role: "user" | "assistant";
+  id: string;
+  role: ChatRole;
   text: string;
-  meta?: { model?: string | null; latency_ms?: number | null };
-  sources?: WebSearchSource[];
+  meta?: {
+    sources?: WebSearchSource[];
+    model?: string | null;
+    latency_ms?: number | null;
+  };
 };
 
-function parseTriggers(raw: string): string[] {
+function uid(prefix: string) {
+  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+}
+
+function parseCsv(raw: string): string[] {
   return (raw || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 }
 
-function formatWhenIso(iso?: string | null): string {
-  if (!iso) return "";
-  // Render gives ISO-ish strings; keep it simple and safe in UI.
-  return iso.replace("T", " ").replace("Z", "");
+function hmFromTimeOfDay(timeOfDay: string): { hour: number; minute: number } {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(timeOfDay || "");
+  if (!m) return { hour: 7, minute: 0 };
+  const hour = Math.max(0, Math.min(23, Number(m[1])));
+  const minute = Math.max(0, Math.min(59, Number(m[2])));
+  return { hour, minute };
+}
+
+function scheduleSummary(s: WebSearchSchedule | null | undefined): string {
+  if (!s) return "Not scheduled";
+  const when = `${s.cadence || "daily"} · ${s.time_of_day} · ${s.timezone}`;
+  const where = `${s.channel} → ${s.destination}`;
+  const onOff = s.enabled ? "On" : "Off";
+  return `${onOff} · ${when} · ${where}`;
 }
 
 export default function WebSearchMvpPanel() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Chat input (also used as "current query" when saving a skill).
-  const [query, setQuery] = useState("");
+  // Chat
+  const [draft, setDraft] = useState("");
+  const [messages, setMessages] = useState<ChatMsg[]>([
+    {
+      id: "welcome",
+      role: "assistant",
+      text: "Tell me what you want. I can answer quickly, and if you want it as a recurring report I can save it as an automation (email/SMS).",
+    },
+  ]);
+  const messagesRef = useRef<HTMLDivElement | null>(null);
 
-  // Optional: allow overriding the model the backend uses (leave blank to use default).
+  // Advanced (optional)
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [model, setModel] = useState("");
 
-  // Latest backend response (used for "turn into skill" and test notifications).
-  const [runOut, setRunOut] = useState<WebSearchRunOut | null>(null);
+  // Last run (used for “Save as automation”)
+  const [lastQuery, setLastQuery] = useState<string>("");
+  const [lastAnswer, setLastAnswer] = useState<string>("");
 
-  const [chat, setChat] = useState<ChatMsg[]>([]);
-  const chatEndRef = useRef<HTMLDivElement | null>(null);
-
+  // Skills + schedules
   const [skills, setSkills] = useState<WebSearchSkill[]>([]);
   const [schedules, setSchedules] = useState<WebSearchSchedule[]>([]);
 
+  // Save skill modal
+  const [saveOpen, setSaveOpen] = useState(false);
   const [newSkillName, setNewSkillName] = useState("");
   const [newSkillTriggers, setNewSkillTriggers] = useState("");
 
-  const [selectedSkillId, setSelectedSkillId] = useState<string>("");
+  // Manage card modal
+  const [manageOpen, setManageOpen] = useState(false);
+  const [manageSkillId, setManageSkillId] = useState<string>("");
   const [hour, setHour] = useState("7");
   const [minute, setMinute] = useState("0");
   const [timezone, setTimezone] = useState("America/New_York");
   const [channel, setChannel] = useState("email");
   const [destination, setDestination] = useState("");
-
-  const [testEmailTo, setTestEmailTo] = useState("");
-  const [testSmsTo, setTestSmsTo] = useState("");
 
   async function refreshLists() {
     const [skillsRes, schedRes] = await Promise.all([
@@ -108,26 +136,34 @@ export default function WebSearchMvpPanel() {
   }, []);
 
   useEffect(() => {
-    // Auto-scroll chat to bottom.
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [chat.length, loading]);
+    // Auto-scroll to bottom on new messages
+    const el = messagesRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages]);
 
-  const skillOptions = useMemo(() => skills.filter((s) => !!s.id), [skills]);
-
-  async function ask(qRaw?: string) {
-    setErr(null);
-
-    const q = (qRaw ?? query).trim();
-    if (!q) {
-      setErr("Type a question to ask Vozlia.");
-      return;
+  const cards = useMemo(() => {
+    const schedBySkill = new Map<string, WebSearchSchedule>();
+    for (const s of schedules) {
+      // MVP: assume 1 schedule per skill; keep first enabled else first
+      if (!schedBySkill.has(s.web_search_skill_id)) {
+        schedBySkill.set(s.web_search_skill_id, s);
+      }
     }
+    return skills
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((sk) => ({ skill: sk, schedule: schedBySkill.get(sk.id) || null }));
+  }, [skills, schedules]);
 
-    // Add the user message first.
-    setChat((cur) => [...cur, { role: "user", text: q }]);
+  function pushMsg(m: ChatMsg) {
+    setMessages((cur) => [...cur, m]);
+  }
 
-    // Keep query in state so “Create Skill” uses the last asked question.
-    setQuery(q);
+  async function runSearch(qRaw: string) {
+    setErr(null);
+    const q = (qRaw || "").trim();
+    if (!q) return;
 
     setLoading(true);
     try {
@@ -140,44 +176,60 @@ export default function WebSearchMvpPanel() {
       if (!res.ok) throw new Error(data?.detail || data?.error || "Search failed");
 
       const out = data as WebSearchRunOut;
-      setRunOut(out);
+      setLastQuery(out.query || q);
+      setLastAnswer(out.answer || "");
 
-      setChat((cur) => [
-        ...cur,
-        {
-          role: "assistant",
-          text: out.answer || "",
-          sources: out.sources || [],
-          meta: { model: out.model ?? null, latency_ms: out.latency_ms ?? null },
-        },
-      ]);
+      pushMsg({
+        id: uid("assistant"),
+        role: "assistant",
+        text: out.answer || "(No answer returned.)",
+        meta: { sources: out.sources || [], model: out.model ?? null, latency_ms: out.latency_ms ?? null },
+      });
+
+      // Subtle inline hint (no buttons, stays chat-like)
+      pushMsg({
+        id: uid("system"),
+        role: "system",
+        text: "If you want this as a recurring report, click “Save as automation” below the chat, or tell me in chat: “save this as an automation”.",
+      });
     } catch (e: any) {
-      const msg = String(e?.message ?? e);
-      setErr(msg);
-      setChat((cur) => [
-        ...cur,
-        {
-          role: "assistant",
-          text: `Sorry — I couldn't complete that request.\n\n${msg}`,
-          meta: { model: null, latency_ms: null },
-        },
-      ]);
+      setErr(String(e?.message ?? e));
+      pushMsg({
+        id: uid("assistant"),
+        role: "assistant",
+        text: `Sorry — I couldn't complete that. ${String(e?.message ?? e)}`,
+      });
     } finally {
       setLoading(false);
     }
   }
 
-  async function createSkillFromCurrentQuery() {
-    setErr(null);
+  async function onSend() {
+    const text = (draft || "").trim();
+    if (!text) return;
 
-    const q = (runOut?.query || query || "").trim();
-    if (!q) {
-      setErr("Ask a question first (or type one above), then create the skill.");
+    setDraft("");
+    pushMsg({ id: uid("user"), role: "user", text });
+
+    // MVP command: “save this …” opens the save modal
+    if (/^save\b/i.test(text) || /save this/i.test(text) || /create.*automation/i.test(text)) {
+      setSaveOpen(true);
       return;
     }
 
-    const name = (newSkillName || "").trim() || `WebSearch: ${q.slice(0, 48)}`;
-    const triggers = parseTriggers(newSkillTriggers);
+    await runSearch(text);
+  }
+
+  async function createSkillFromLastQuery() {
+    setErr(null);
+    const q = (lastQuery || "").trim();
+    if (!q) {
+      setErr("Ask a question first so there’s something to save.");
+      return;
+    }
+
+    const name = (newSkillName || "").trim() || `Automation: ${q.slice(0, 48)}`;
+    const triggers = parseCsv(newSkillTriggers);
 
     setLoading(true);
     try {
@@ -189,13 +241,18 @@ export default function WebSearchMvpPanel() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.error || "Create skill failed");
 
-      // Prefer selecting the newly created skill for scheduling.
-      if (data?.id) setSelectedSkillId(String(data.id));
-
       await refreshLists();
       if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
+
+      setSaveOpen(false);
       setNewSkillName("");
       setNewSkillTriggers("");
+
+      pushMsg({
+        id: uid("assistant"),
+        role: "assistant",
+        text: `Saved. I created an automation called “${name}”. You can set delivery (email/SMS + schedule) from the card below.`,
+      });
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     } finally {
@@ -203,31 +260,38 @@ export default function WebSearchMvpPanel() {
     }
   }
 
-  async function deleteSkill(id: string) {
-    if (!id) return;
-    setErr(null);
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/admin/websearch/skills/${encodeURIComponent(id)}`, { method: "DELETE" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || "Delete failed");
-      await refreshLists();
-      if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
-      if (selectedSkillId === id) setSelectedSkillId("");
-    } catch (e: any) {
-      setErr(String(e?.message ?? e));
-    } finally {
-      setLoading(false);
+  function openManage(skillId: string) {
+    const sk = skills.find((s) => s.id === skillId) || null;
+    const sc = schedules.find((s) => s.web_search_skill_id === skillId) || null;
+
+    setManageSkillId(skillId);
+
+    // Prefill delivery fields from schedule if present; else sensible defaults
+    if (sc) {
+      const { hour, minute } = hmFromTimeOfDay(sc.time_of_day);
+      setHour(String(hour));
+      setMinute(String(minute));
+      setTimezone(sc.timezone || "America/New_York");
+      setChannel(sc.channel || "email");
+      setDestination(sc.destination || "");
+    } else {
+      setHour("7");
+      setMinute("0");
+      setTimezone("America/New_York");
+      setChannel("email");
+      setDestination("");
     }
+
+    setManageOpen(true);
   }
 
   async function upsertSchedule() {
     setErr(null);
-
-    if (!selectedSkillId) {
-      setErr("Select a saved Web Search skill to schedule.");
+    if (!manageSkillId) {
+      setErr("No skill selected.");
       return;
     }
+
     const h = Number(hour);
     const m = Number(minute);
     if (!Number.isFinite(h) || h < 0 || h > 23) {
@@ -249,10 +313,10 @@ export default function WebSearchMvpPanel() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          web_search_skill_id: selectedSkillId,
+          web_search_skill_id: manageSkillId,
           hour: h,
           minute: m,
-          timezone: timezone.trim() || "America/New_York",
+          timezone: (timezone || "").trim() || "America/New_York",
           channel,
           destination: destination.trim(),
         }),
@@ -262,50 +326,13 @@ export default function WebSearchMvpPanel() {
 
       await refreshLists();
       if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
-    } catch (e: any) {
-      setErr(String(e?.message ?? e));
-    } finally {
-      setLoading(false);
-    }
-  }
 
-  async function deleteSchedule(id: string) {
-    if (!id) return;
-    setErr(null);
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/admin/websearch/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || "Delete failed");
-      await refreshLists();
-      if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
-    } catch (e: any) {
-      setErr(String(e?.message ?? e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function sendTestEmail() {
-    setErr(null);
-    if (!testEmailTo.trim()) {
-      setErr("Enter an email address for a test email.");
-      return;
-    }
-    const body = (runOut?.answer || "").trim() || "(no answer yet)";
-    setLoading(true);
-    try {
-      const res = await fetch("/api/admin/notify/email", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          to: testEmailTo.trim(),
-          subject: "Vozlia WebSearch Test",
-          body,
-        }),
+      setManageOpen(false);
+      pushMsg({
+        id: uid("assistant"),
+        role: "assistant",
+        text: `Scheduled. I’ll deliver that automation via ${channel} to ${destination.trim()} at ${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")} (${timezone || "America/New_York"}).`,
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || "Email failed");
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     } finally {
@@ -313,39 +340,35 @@ export default function WebSearchMvpPanel() {
     }
   }
 
-  async function sendTestSms() {
-    setErr(null);
-    if (!testSmsTo.trim()) {
-      setErr("Enter a phone number for a test SMS.");
-      return;
-    }
-    const body = (runOut?.answer || "").trim() || "(no answer yet)";
-    setLoading(true);
-    try {
-      const res = await fetch("/api/admin/notify/sms", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          to: testSmsTo.trim(),
-          body,
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || "SMS failed");
-    } catch (e: any) {
-      setErr(String(e?.message ?? e));
-    } finally {
-      setLoading(false);
-    }
-  }
+  const manageSkill = useMemo(() => skills.find((s) => s.id === manageSkillId) || null, [skills, manageSkillId]);
+  const manageSchedule = useMemo(
+    () => schedules.find((s) => s.web_search_skill_id === manageSkillId) || null,
+    [schedules, manageSkillId]
+  );
 
   return (
     <div className="panel">
-      <div className="panelTitle">Configuration Wizard</div>
-      <div className="panelSub">
-        ChatGPT-style entry point. Ask a question, then optionally turn it into a saved skill and schedule deliveries. (Currently:
-        Web Search.)
+      <div className="wizardTop">
+        <div>
+          <div className="panelTitle">Chat</div>
+          <div className="panelSub">Ask anything. If it’s useful as a recurring report, save it as an automation.</div>
+        </div>
+        <button className="btnTertiary" type="button" onClick={() => setShowAdvanced((v) => !v)}>
+          {showAdvanced ? "Hide" : "Show"} advanced
+        </button>
       </div>
+
+      {showAdvanced ? (
+        <div className="panelInset" style={{ marginTop: 12 }}>
+          <div className="field">
+            <div className="fieldLabel">Model (optional)</div>
+            <input className="input" value={model} onChange={(e) => setModel(e.target.value)} placeholder="leave blank for backend default" />
+          </div>
+          <div className="rowSub" style={{ marginTop: 8 }}>
+            Tip: Leave this blank unless you’re testing models.
+          </div>
+        </div>
+      ) : null}
 
       {err ? (
         <div className="alert" style={{ marginTop: 12 }}>
@@ -354,298 +377,365 @@ export default function WebSearchMvpPanel() {
         </div>
       ) : null}
 
-      {/* Chat console */}
-      <div className="panelInset" style={{ marginTop: 12 }}>
-        <div style={{ fontWeight: 600, marginBottom: 8 }}>Ask Vozlia</div>
-        <div
-          style={{
-            border: "1px solid rgba(0,0,0,0.12)",
-            borderRadius: 10,
-            padding: 10,
-            maxHeight: 320,
-            overflowY: "auto",
-            background: "rgba(0,0,0,0.02)",
-          }}
-        >
-          {chat.length === 0 ? (
-            <div style={{ opacity: 0.8, fontSize: 13 }}>
-              Try: <b>Are alternate side parking rules in effect today in NYC?</b>
-            </div>
-          ) : null}
-
-          {chat.map((m, idx) => (
-            <div key={idx} style={{ marginTop: idx === 0 ? 0 : 10 }}>
-              <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 4 }}>{m.role === "user" ? "You" : "Vozlia"}</div>
-              <div
-                style={{
-                  whiteSpace: "pre-wrap",
-                  fontSize: 14,
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(0,0,0,0.10)",
-                  background: m.role === "user" ? "rgba(0,0,0,0.04)" : "rgba(255,255,255,0.7)",
-                }}
-              >
-                {m.text}
+      <div className="chatShell" style={{ marginTop: 12 }}>
+        <div className="chatMessages" ref={messagesRef}>
+          {messages.map((m) => (
+            <div key={m.id} className={`chatMsg ${m.role}`}>
+              <div className="chatBubble">
+                <div style={{ whiteSpace: "pre-wrap" }}>{m.text}</div>
+                {m.role === "assistant" && (m.meta?.model || m.meta?.latency_ms != null) ? (
+                  <div className="chatMeta">
+                    {m.meta?.model ? `model=${m.meta.model}` : ""}
+                    {m.meta?.latency_ms != null ? ` · latency_ms=${Math.round(m.meta.latency_ms)}` : ""}
+                  </div>
+                ) : null}
+                {m.role === "assistant" && (m.meta?.sources || []).length ? (
+                  <details className="chatSources">
+                    <summary>Sources</summary>
+                    <ul style={{ margin: "8px 0 0 18px" }}>
+                      {(m.meta?.sources || []).slice(0, 8).map((s, idx) => (
+                        <li key={idx}>
+                          <a href={s.url} target="_blank" rel="noreferrer" style={{ color: "var(--text)" }}>
+                            {s.title || s.url}
+                          </a>
+                          {s.snippet ? <div className="rowSub">{s.snippet}</div> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
               </div>
-
-              {m.role === "assistant" && (m.meta?.model || m.meta?.latency_ms != null) ? (
-                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
-                  model={m.meta?.model || "(default)"} · latency_ms={m.meta?.latency_ms ?? "?"}
-                </div>
-              ) : null}
-
-              {m.role === "assistant" && (m.sources || []).length ? (
-                <div style={{ marginTop: 8 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, opacity: 0.8 }}>Sources</div>
-                  <ul style={{ marginTop: 6 }}>
-                    {(m.sources || []).slice(0, 8).map((s, sIdx) => (
-                      <li key={sIdx} style={{ fontSize: 13, marginTop: 4 }}>
-                        <a href={s.url} target="_blank" rel="noreferrer">
-                          {s.title || s.url}
-                        </a>
-                        {s.snippet ? <div style={{ opacity: 0.8 }}>{s.snippet}</div> : null}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
             </div>
           ))}
-
-          {loading ? <div style={{ marginTop: 10, opacity: 0.8 }}>Thinking…</div> : null}
-          <div ref={chatEndRef} />
         </div>
 
-        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+        <div className="chatInputRow">
           <textarea
-            className="input"
-            style={{ flex: 1, minHeight: 44, resize: "vertical" }}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Type your question…"
+            className="chatInput"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="Type your goal or question…"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                ask().catch(() => null);
+                onSend().catch(() => null);
               }
             }}
           />
-          <button className="btnPrimary" type="button" disabled={loading} onClick={() => ask().catch(() => null)}>
-            {loading ? "Asking…" : "Ask"}
+          <button className="btnPrimary" type="button" disabled={loading} onClick={() => onSend().catch(() => null)}>
+            {loading ? "…" : "Send"}
           </button>
         </div>
-
-        <details style={{ marginTop: 10 }}>
-          <summary style={{ cursor: "pointer", opacity: 0.85 }}>Advanced</summary>
-          <div style={{ marginTop: 10 }}>
-            <div className="field">
-              <div className="fieldLabel">Model override (optional)</div>
-              <input
-                className="input"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="leave blank for backend default"
-              />
-            </div>
-          </div>
-        </details>
       </div>
 
-      {/* Turn into skill */}
+      <div className="actions" style={{ marginTop: 12 }}>
+        <button
+          className="btnSecondary"
+          type="button"
+          disabled={loading || !lastQuery}
+          onClick={() => {
+            setSaveOpen(true);
+          }}
+        >
+          Save as automation
+        </button>
+        <button className="btnSecondary" type="button" disabled={loading} onClick={() => refreshLists().catch(() => null)}>
+          Refresh
+        </button>
+      </div>
+
       <div className="panelInset" style={{ marginTop: 12 }}>
-        <div style={{ fontWeight: 600 }}>Turn this into a skill (optional)</div>
-        <div style={{ opacity: 0.8, fontSize: 13, marginTop: 6 }}>
-          This saves the last asked question as a Web Search skill and makes it available elsewhere in the portal.
-        </div>
-
-        <div className="form" style={{ marginTop: 12 }}>
-          <div className="field">
-            <div className="fieldLabel">Skill name</div>
-            <input className="input" value={newSkillName} onChange={(e) => setNewSkillName(e.target.value)} placeholder="NYC Alternate Side Parking" />
-          </div>
-
-          <div className="field">
-            <div className="fieldLabel">Trigger phrases (comma-separated)</div>
-            <input
-              className="input"
-              value={newSkillTriggers}
-              onChange={(e) => setNewSkillTriggers(e.target.value)}
-              placeholder="alternate side parking, ASP rules"
-            />
-          </div>
-
-          <div className="actions">
-            <button className="btnPrimary" type="button" disabled={loading} onClick={() => createSkillFromCurrentQuery().catch(() => null)}>
-              {loading ? "Saving…" : "Create Skill"}
-            </button>
-            <button className="btnSecondary" type="button" disabled={loading} onClick={() => refreshLists().catch(() => null)}>
-              Refresh
-            </button>
+        <div className="row">
+          <div className="rowMain">
+            <div className="rowTitle">Automations</div>
+            <div className="rowSub">
+              Automations you’ve saved. Click a card to set delivery (schedule + channel).
+            </div>
           </div>
         </div>
+
+        {cards.length ? (
+          <div className="autoGrid">
+            {cards.map(({ skill, schedule }) => (
+              <button key={skill.id} type="button" className="autoCard" onClick={() => openManage(skill.id)}>
+                <div>
+                  <div className="autoTitle">{skill.name}</div>
+                  <div className="autoMeta">{scheduleSummary(schedule)}</div>
+                </div>
+                <div className="autoFooter">
+                  <span className={`pill ${skill.enabled ? "pillOn" : "pillOff"}`}>{skill.enabled ? "Enabled" : "Disabled"}</span>
+                  <span className="autoSmall">Click to manage</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="rowSub" style={{ marginTop: 10 }}>
+            No saved automations yet.
+          </div>
+        )}
       </div>
 
-      {/* Scheduling */}
-      <div className="panelInset" style={{ marginTop: 12 }}>
-        <div style={{ fontWeight: 600 }}>Schedule delivery (optional)</div>
-        <div style={{ opacity: 0.8, fontSize: 13, marginTop: 6 }}>
-          Schedule a saved Web Search skill for daily delivery via Email (or SMS if configured).
-        </div>
-
-        <div className="form" style={{ marginTop: 12 }}>
-          <div className="field">
-            <div className="fieldLabel">Saved skill</div>
-            <select className="input" value={selectedSkillId} onChange={(e) => setSelectedSkillId(e.target.value)}>
-              <option value="">Select…</option>
-              {skillOptions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="field" style={{ display: "flex", gap: 8 }}>
-            <div style={{ flex: 1 }}>
-              <div className="fieldLabel">Hour (0–23)</div>
-              <input className="input" value={hour} onChange={(e) => setHour(e.target.value)} />
+      {/* Save modal */}
+      {saveOpen ? (
+        <div className="modalOverlay" onMouseDown={() => setSaveOpen(false)}>
+          <div className="modalCard" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="modalTitle">Save as automation</div>
+            <div className="rowSub" style={{ marginTop: 6 }}>
+              This will create an automation card from your most recent question.
             </div>
-            <div style={{ flex: 1 }}>
-              <div className="fieldLabel">Minute (0–59)</div>
-              <input className="input" value={minute} onChange={(e) => setMinute(e.target.value)} />
+
+            <div className="field" style={{ marginTop: 12 }}>
+              <div className="fieldLabel">Name</div>
+              <input className="input" value={newSkillName} onChange={(e) => setNewSkillName(e.target.value)} placeholder="e.g., NYC Alternate Side Parking" />
             </div>
-          </div>
 
-          <div className="field">
-            <div className="fieldLabel">Timezone</div>
-            <input className="input" value={timezone} onChange={(e) => setTimezone(e.target.value)} />
-          </div>
+            {showAdvanced ? (
+              <div className="field" style={{ marginTop: 10 }}>
+                <div className="fieldLabel">Triggers (optional, comma-separated)</div>
+                <input className="input" value={newSkillTriggers} onChange={(e) => setNewSkillTriggers(e.target.value)} placeholder="e.g., alternate side parking, ASP rules" />
+              </div>
+            ) : (
+              <div className="rowSub" style={{ marginTop: 10 }}>
+                Tip: Enable “advanced” if you want custom trigger phrases.
+              </div>
+            )}
 
-          <div className="field">
-            <div className="fieldLabel">Channel</div>
-            <select className="input" value={channel} onChange={(e) => setChannel(e.target.value)}>
-              <option value="email">email</option>
-              <option value="sms">sms</option>
-              <option value="whatsapp">whatsapp</option>
-              <option value="call">call</option>
-            </select>
-          </div>
-
-          <div className="field">
-            <div className="fieldLabel">Destination (email or phone number)</div>
-            <input className="input" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="yasinc74@gmail.com or +1917..." />
-          </div>
-
-          <div className="actions">
-            <button className="btnPrimary" type="button" disabled={loading} onClick={() => upsertSchedule().catch(() => null)}>
-              {loading ? "Saving…" : "Save Schedule"}
-            </button>
-            <button className="btnSecondary" type="button" disabled={loading} onClick={() => refreshLists().catch(() => null)}>
-              Refresh
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Quick view */}
-      <details style={{ marginTop: 12 }}>
-        <summary style={{ cursor: "pointer", opacity: 0.85 }}>Saved Web Search skills & schedules (quick view)</summary>
-
-        <div className="panelInset" style={{ marginTop: 10 }}>
-          <div style={{ fontWeight: 600 }}>Saved skills</div>
-          {skills.length === 0 ? (
-            <div style={{ opacity: 0.8, marginTop: 8 }}>No saved Web Search skills yet.</div>
-          ) : (
-            <div style={{ marginTop: 10 }}>
-              {skills.map((s) => (
-                <div key={s.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderBottom: "1px solid rgba(0,0,0,0.06)" }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600 }}>{s.name}</div>
-                    <div style={{ opacity: 0.8, fontSize: 13 }}>{s.query}</div>
-                    {(s.triggers || []).length ? <div style={{ opacity: 0.7, fontSize: 12 }}>triggers: {(s.triggers || []).join(", ")}</div> : null}
-                  </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <button className="btnSecondary" type="button" onClick={() => setSelectedSkillId(s.id)}>
-                      Select
-                    </button>
-                    <button className="btnDanger" type="button" disabled={loading} onClick={() => deleteSkill(s.id).catch(() => null)}>
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="panelInset" style={{ marginTop: 10 }}>
-          <div style={{ fontWeight: 600 }}>Saved schedules</div>
-          {schedules.length === 0 ? (
-            <div style={{ opacity: 0.8, marginTop: 8 }}>No schedules yet.</div>
-          ) : (
-            <div style={{ marginTop: 10 }}>
-              {schedules.map((r) => (
-                <div key={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderBottom: "1px solid rgba(0,0,0,0.06)" }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600 }}>
-                      {r.channel} → {r.destination}
-                    </div>
-                    <div style={{ opacity: 0.8, fontSize: 13 }}>
-                      {r.cadence} · {r.time_of_day} · {r.timezone}
-                    </div>
-                    {r.next_run_at ? <div style={{ opacity: 0.7, fontSize: 12 }}>next: {formatWhenIso(r.next_run_at)}</div> : null}
-                    {r.last_run_at ? <div style={{ opacity: 0.7, fontSize: 12 }}>last: {formatWhenIso(r.last_run_at)}</div> : null}
-                  </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <button className="btnDanger" type="button" disabled={loading} onClick={() => deleteSchedule(r.id).catch(() => null)}>
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </details>
-
-      {/* Test notifications */}
-      <details style={{ marginTop: 12 }}>
-        <summary style={{ cursor: "pointer", opacity: 0.85 }}>Test notifications (optional)</summary>
-
-        <div className="panelInset" style={{ marginTop: 10 }}>
-          <div style={{ fontWeight: 600 }}>Send a test email</div>
-          <div className="form" style={{ marginTop: 10 }}>
-            <div className="field">
-              <div className="fieldLabel">To</div>
-              <input className="input" value={testEmailTo} onChange={(e) => setTestEmailTo(e.target.value)} placeholder="your@email.com" />
-            </div>
-            <div className="actions">
-              <button className="btnPrimary" type="button" disabled={loading} onClick={() => sendTestEmail().catch(() => null)}>
-                {loading ? "Sending…" : "Send Email"}
+            <div className="actions" style={{ marginTop: 14 }}>
+              <button className="btnPrimary" type="button" disabled={loading} onClick={() => createSkillFromLastQuery().catch(() => null)}>
+                {loading ? "Saving…" : "Save"}
+              </button>
+              <button className="btnSecondary" type="button" disabled={loading} onClick={() => setSaveOpen(false)}>
+                Cancel
               </button>
             </div>
-          </div>
-        </div>
 
-        <div className="panelInset" style={{ marginTop: 10 }}>
-          <div style={{ fontWeight: 600 }}>Send a test SMS</div>
-          <div style={{ opacity: 0.8, fontSize: 13, marginTop: 6 }}>
-            Requires a working SMS provider (e.g., Twilio A2P-approved sender).
-          </div>
-          <div className="form" style={{ marginTop: 10 }}>
-            <div className="field">
-              <div className="fieldLabel">To</div>
-              <input className="input" value={testSmsTo} onChange={(e) => setTestSmsTo(e.target.value)} placeholder="+1917..." />
-            </div>
-            <div className="actions">
-              <button className="btnPrimary" type="button" disabled={loading} onClick={() => sendTestSms().catch(() => null)}>
-                {loading ? "Sending…" : "Send SMS"}
-              </button>
-            </div>
+            {lastQuery ? (
+              <div className="panelInset" style={{ marginTop: 12 }}>
+                <div className="rowSub">Saved query:</div>
+                <div style={{ marginTop: 6, whiteSpace: "pre-wrap", fontSize: 13 }}>{lastQuery}</div>
+              </div>
+            ) : null}
           </div>
         </div>
-      </details>
+      ) : null}
+
+      {/* Manage modal */}
+      {manageOpen && manageSkill ? (
+        <div className="modalOverlay" onMouseDown={() => setManageOpen(false)}>
+          <div className="modalCard" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="modalTitle">{manageSkill.name}</div>
+            <div className="rowSub" style={{ marginTop: 6 }}>
+              {manageSchedule ? scheduleSummary(manageSchedule) : "Not scheduled yet"}
+            </div>
+
+            <div className="panelInset" style={{ marginTop: 12 }}>
+              <div className="field">
+                <div className="fieldLabel">Time</div>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <input className="input" value={hour} onChange={(e) => setHour(e.target.value)} style={{ width: 90 }} />
+                  <input className="input" value={minute} onChange={(e) => setMinute(e.target.value)} style={{ width: 90 }} />
+                  <input className="input" value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder="America/New_York" />
+                </div>
+                <div className="rowSub" style={{ marginTop: 6 }}>
+                  Hour is 0–23, minute is 0–59. Timezone must be an IANA TZ string.
+                </div>
+              </div>
+
+              <div className="field" style={{ marginTop: 10 }}>
+                <div className="fieldLabel">Delivery</div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <select className="input" value={channel} onChange={(e) => setChannel(e.target.value)} style={{ width: 140 }}>
+                    <option value="email">email</option>
+                    <option value="sms">sms</option>
+                  </select>
+                  <input className="input" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder={channel === "email" ? "you@example.com" : "+15551234567"} style={{ minWidth: 260, flex: 1 }} />
+                </div>
+              </div>
+
+              <div className="actions" style={{ marginTop: 14 }}>
+                <button className="btnPrimary" type="button" disabled={loading} onClick={() => upsertSchedule().catch(() => null)}>
+                  {loading ? "Saving…" : manageSchedule ? "Update schedule" : "Create schedule"}
+                </button>
+                <button className="btnSecondary" type="button" disabled={loading} onClick={() => setManageOpen(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <details style={{ marginTop: 12 }}>
+              <summary className="rowSub">Show automation query</summary>
+              <div className="panelInset" style={{ marginTop: 8, whiteSpace: "pre-wrap", fontSize: 13 }}>
+                {manageSkill.query}
+              </div>
+              {manageSkill.triggers?.length ? (
+                <div className="rowSub" style={{ marginTop: 8 }}>
+                  Triggers: {manageSkill.triggers.join(", ")}
+                </div>
+              ) : null}
+            </details>
+          </div>
+        </div>
+      ) : null}
+
+      <style jsx>{`
+        .wizardTop {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 12px;
+        }
+        .btnTertiary {
+          border: 1px solid var(--border);
+          background: transparent;
+          color: var(--muted);
+          border-radius: 999px;
+          padding: 8px 12px;
+          cursor: pointer;
+        }
+        .chatShell {
+          border: 1px solid var(--border);
+          background: var(--card);
+          border-radius: 18px;
+          overflow: hidden;
+          box-shadow: var(--shadow);
+        }
+        .chatMessages {
+          height: 520px;
+          overflow: auto;
+          padding: 14px;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .chatMsg {
+          display: flex;
+        }
+        .chatMsg.user {
+          justify-content: flex-end;
+        }
+        .chatMsg.assistant {
+          justify-content: flex-start;
+        }
+        .chatMsg.system {
+          justify-content: center;
+        }
+        .chatBubble {
+          max-width: 86%;
+          border-radius: 16px;
+          padding: 10px 12px;
+          border: 1px solid var(--border);
+          background: var(--card);
+        }
+        .chatMsg.user .chatBubble {
+          background: var(--accentSoft);
+          border-color: rgba(6, 182, 212, 0.25);
+        }
+        .chatMsg.system .chatBubble {
+          border: none;
+          background: transparent;
+          color: var(--muted);
+          font-size: 12px;
+          padding: 0;
+          max-width: 92%;
+          text-align: center;
+        }
+        .chatMeta {
+          margin-top: 8px;
+          font-size: 12px;
+          color: var(--muted);
+        }
+        .chatSources {
+          margin-top: 10px;
+          font-size: 13px;
+          color: var(--muted);
+        }
+        .chatInputRow {
+          display: flex;
+          gap: 10px;
+          padding: 12px;
+          border-top: 1px solid var(--border);
+        }
+        .chatInput {
+          flex: 1;
+          border: 1px solid var(--border);
+          border-radius: 14px;
+          padding: 12px;
+          font-size: 14px;
+          outline: none;
+          resize: vertical;
+          min-height: 54px;
+          max-height: 180px;
+          background: #fff;
+        }
+
+        .autoGrid {
+          margin-top: 12px;
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+          gap: 14px;
+        }
+        .autoCard {
+          text-align: left;
+          border-radius: 16px;
+          border: 1px solid var(--border);
+          background: var(--card);
+          padding: 14px;
+          cursor: pointer;
+          box-shadow: var(--shadow);
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          aspect-ratio: 1 / 1;
+        }
+        .autoTitle {
+          font-weight: 700;
+          font-size: 15px;
+          line-height: 1.25;
+        }
+        .autoMeta {
+          margin-top: 10px;
+          font-size: 12px;
+          color: var(--muted);
+          line-height: 1.35;
+        }
+        .autoFooter {
+          margin-top: 12px;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 10px;
+        }
+        .autoSmall {
+          font-size: 12px;
+          color: var(--muted);
+        }
+
+        .modalOverlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(15, 23, 42, 0.55);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 18px;
+          z-index: 50;
+        }
+        .modalCard {
+          width: min(720px, 96vw);
+          max-height: 92vh;
+          overflow: auto;
+          border-radius: 18px;
+          border: 1px solid var(--border);
+          background: var(--card);
+          box-shadow: var(--shadow);
+          padding: 16px;
+        }
+        .modalTitle {
+          font-size: 16px;
+          font-weight: 800;
+        }
+      `}</style>
     </div>
   );
 }
