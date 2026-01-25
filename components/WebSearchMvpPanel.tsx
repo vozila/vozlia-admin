@@ -131,6 +131,7 @@ export default function WebSearchMvpPanel() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.error || "Create skill failed");
       await refreshLists();
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
       setNewSkillName("");
       setNewSkillTriggers("");
     } catch (e: any) {
@@ -149,6 +150,7 @@ export default function WebSearchMvpPanel() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.error || "Delete failed");
       await refreshLists();
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     } finally {
@@ -194,6 +196,7 @@ export default function WebSearchMvpPanel() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.error || "Schedule failed");
       await refreshLists();
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     } finally {
