@@ -20,7 +20,7 @@ type EmailAccount = {
   email_address?: string | null;
   display_name?: string | null;
   is_active: boolean;
-  // Some providers support a "primary" notion (e.g., Gmail default account).
+  // Some providers support a 'primary' notion (e.g., Gmail default account).
   // Control plane may omit this field for non-applicable providers.
   is_primary?: boolean;
 };
@@ -108,7 +108,7 @@ export default function AdminPage() {
     logging: false,
     email: false,
     renderLogs: false,
-    websearchMvp: true,
+    websearchMvp: false,
   });
 
   const [activeSkill, setActiveSkill] = useState<SkillKey | null>(null);
