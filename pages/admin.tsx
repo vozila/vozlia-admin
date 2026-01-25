@@ -18,6 +18,7 @@ type EmailAccount = {
   display_name?: string | null;
   provider_type?: string | null;
   is_active?: boolean;
+  is_primary?: boolean;
 };
 
 type Playbook = { id: string; name: string; enabled: boolean; steps: SkillKey[] };
