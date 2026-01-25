@@ -108,7 +108,7 @@ export default function AdminPage() {
     logging: false,
     email: false,
     renderLogs: false,
-    websearchMvp: false,
+    websearchMvp: true,
   });
 
   const [activeSkill, setActiveSkill] = useState<SkillKey | null>(null);
