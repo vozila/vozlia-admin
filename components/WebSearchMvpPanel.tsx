@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type WebSearchSource = {
   title: string;
@@ -38,6 +38,13 @@ type WebSearchSchedule = {
   last_run_at?: string | null;
 };
 
+type ChatMsg = {
+  role: "user" | "assistant";
+  text: string;
+  meta?: { model?: string | null; latency_ms?: number | null };
+  sources?: WebSearchSource[];
+};
+
 function parseTriggers(raw: string): string[] {
   return (raw || "")
     .split(",")
@@ -45,13 +52,27 @@ function parseTriggers(raw: string): string[] {
     .filter(Boolean);
 }
 
+function formatWhenIso(iso?: string | null): string {
+  if (!iso) return "";
+  // Render gives ISO-ish strings; keep it simple and safe in UI.
+  return iso.replace("T", " ").replace("Z", "");
+}
+
 export default function WebSearchMvpPanel() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Chat input (also used as "current query" when saving a skill).
   const [query, setQuery] = useState("");
+
+  // Optional: allow overriding the model the backend uses (leave blank to use default).
   const [model, setModel] = useState("");
+
+  // Latest backend response (used for "turn into skill" and test notifications).
   const [runOut, setRunOut] = useState<WebSearchRunOut | null>(null);
+
+  const [chat, setChat] = useState<ChatMsg[]>([]);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const [skills, setSkills] = useState<WebSearchSkill[]>([]);
   const [schedules, setSchedules] = useState<WebSearchSchedule[]>([]);
@@ -86,26 +107,61 @@ export default function WebSearchMvpPanel() {
     refreshLists().catch(() => null);
   }, []);
 
+  useEffect(() => {
+    // Auto-scroll chat to bottom.
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [chat.length, loading]);
+
   const skillOptions = useMemo(() => skills.filter((s) => !!s.id), [skills]);
 
-  async function runSearch() {
+  async function ask(qRaw?: string) {
     setErr(null);
-    if (!query.trim()) {
-      setErr("Enter a query.");
+
+    const q = (qRaw ?? query).trim();
+    if (!q) {
+      setErr("Type a question to ask Vozlia.");
       return;
     }
+
+    // Add the user message first.
+    setChat((cur) => [...cur, { role: "user", text: q }]);
+
+    // Keep query in state so “Create Skill” uses the last asked question.
+    setQuery(q);
+
     setLoading(true);
     try {
       const res = await fetch("/api/admin/websearch/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: query.trim(), model: model.trim() || null }),
+        body: JSON.stringify({ query: q, model: model.trim() || null }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.error || "Search failed");
-      setRunOut(data as WebSearchRunOut);
+
+      const out = data as WebSearchRunOut;
+      setRunOut(out);
+
+      setChat((cur) => [
+        ...cur,
+        {
+          role: "assistant",
+          text: out.answer || "",
+          sources: out.sources || [],
+          meta: { model: out.model ?? null, latency_ms: out.latency_ms ?? null },
+        },
+      ]);
     } catch (e: any) {
-      setErr(String(e?.message ?? e));
+      const msg = String(e?.message ?? e);
+      setErr(msg);
+      setChat((cur) => [
+        ...cur,
+        {
+          role: "assistant",
+          text: `Sorry — I couldn't complete that request.\n\n${msg}`,
+          meta: { model: null, latency_ms: null },
+        },
+      ]);
     } finally {
       setLoading(false);
     }
@@ -113,11 +169,13 @@ export default function WebSearchMvpPanel() {
 
   async function createSkillFromCurrentQuery() {
     setErr(null);
+
     const q = (runOut?.query || query || "").trim();
     if (!q) {
-      setErr("Run a search (or enter a query) first.");
+      setErr("Ask a question first (or type one above), then create the skill.");
       return;
     }
+
     const name = (newSkillName || "").trim() || `WebSearch: ${q.slice(0, 48)}`;
     const triggers = parseTriggers(newSkillTriggers);
 
@@ -130,6 +188,10 @@ export default function WebSearchMvpPanel() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.error || "Create skill failed");
+
+      // Prefer selecting the newly created skill for scheduling.
+      if (data?.id) setSelectedSkillId(String(data.id));
+
       await refreshLists();
       if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
       setNewSkillName("");
@@ -151,6 +213,7 @@ export default function WebSearchMvpPanel() {
       if (!res.ok) throw new Error(data?.detail || data?.error || "Delete failed");
       await refreshLists();
       if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
+      if (selectedSkillId === id) setSelectedSkillId("");
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     } finally {
@@ -160,8 +223,9 @@ export default function WebSearchMvpPanel() {
 
   async function upsertSchedule() {
     setErr(null);
+
     if (!selectedSkillId) {
-      setErr("Select a skill to schedule.");
+      setErr("Select a saved Web Search skill to schedule.");
       return;
     }
     const h = Number(hour);
@@ -195,6 +259,24 @@ export default function WebSearchMvpPanel() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.error || "Schedule failed");
+
+      await refreshLists();
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function deleteSchedule(id: string) {
+    if (!id) return;
+    setErr(null);
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/admin/websearch/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || data?.error || "Delete failed");
       await refreshLists();
       if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
     } catch (e: any) {
@@ -259,9 +341,10 @@ export default function WebSearchMvpPanel() {
 
   return (
     <div className="panel">
-      <div className="panelTitle">Web Search MVP</div>
+      <div className="panelTitle">Configuration Wizard</div>
       <div className="panelSub">
-        Run a search via the backend, optionally save it as a WebSearch skill, then schedule delivery via the scheduled worker.
+        ChatGPT-style entry point. Ask a question, then optionally turn it into a saved skill and schedule deliveries. (Currently:
+        Web Search.)
       </div>
 
       {err ? (
@@ -271,136 +354,166 @@ export default function WebSearchMvpPanel() {
         </div>
       ) : null}
 
-      <div className="form" style={{ marginTop: 12 }}>
-        <div className="field">
-          <div className="fieldLabel">Query</div>
-          <input className="input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g., Are NYC alternate side parking rules in effect today?" />
-        </div>
-
-        <div className="field">
-          <div className="fieldLabel">Model (optional)</div>
-          <input className="input" value={model} onChange={(e) => setModel(e.target.value)} placeholder="leave blank for backend default" />
-        </div>
-
-        <div className="actions">
-          <button className="btnPrimary" type="button" disabled={loading} onClick={runSearch}>
-            {loading ? "Running…" : "Run Search"}
-          </button>
-          <button className="btnSecondary" type="button" disabled={loading} onClick={() => refreshLists().catch(() => null)}>
-            Refresh Lists
-          </button>
-        </div>
-
-        {runOut ? (
-          <div className="panelInset">
-            <div className="row">
-              <div className="rowMain">
-                <div className="rowTitle">Answer</div>
-                <div className="rowSub">
-                  model={runOut.model || "(default)"} · latency_ms={runOut.latency_ms ?? "?"}
-                </div>
-              </div>
+      {/* Chat console */}
+      <div className="panelInset" style={{ marginTop: 12 }}>
+        <div style={{ fontWeight: 600, marginBottom: 8 }}>Ask Vozlia</div>
+        <div
+          style={{
+            border: "1px solid rgba(0,0,0,0.12)",
+            borderRadius: 10,
+            padding: 10,
+            maxHeight: 320,
+            overflowY: "auto",
+            background: "rgba(0,0,0,0.02)",
+          }}
+        >
+          {chat.length === 0 ? (
+            <div style={{ opacity: 0.8, fontSize: 13 }}>
+              Try: <b>Are alternate side parking rules in effect today in NYC?</b>
             </div>
-            <div style={{ whiteSpace: "pre-wrap", marginTop: 10, fontSize: 14 }}>{runOut.answer}</div>
+          ) : null}
 
-            {(runOut.sources || []).length ? (
-              <div style={{ marginTop: 12 }}>
-                <div className="fieldLabel">Sources</div>
-                <ul style={{ marginTop: 6 }}>
-                  {(runOut.sources || []).slice(0, 8).map((s, idx) => (
-                    <li key={idx}>
-                      <a href={s.url} target="_blank" rel="noreferrer">
-                        {s.title || s.url}
-                      </a>
-                      {s.snippet ? <div className="muted">{s.snippet}</div> : null}
-                    </li>
-                  ))}
-                </ul>
+          {chat.map((m, idx) => (
+            <div key={idx} style={{ marginTop: idx === 0 ? 0 : 10 }}>
+              <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 4 }}>{m.role === "user" ? "You" : "Vozlia"}</div>
+              <div
+                style={{
+                  whiteSpace: "pre-wrap",
+                  fontSize: 14,
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(0,0,0,0.10)",
+                  background: m.role === "user" ? "rgba(0,0,0,0.04)" : "rgba(255,255,255,0.7)",
+                }}
+              >
+                {m.text}
               </div>
-            ) : null}
+
+              {m.role === "assistant" && (m.meta?.model || m.meta?.latency_ms != null) ? (
+                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
+                  model={m.meta?.model || "(default)"} · latency_ms={m.meta?.latency_ms ?? "?"}
+                </div>
+              ) : null}
+
+              {m.role === "assistant" && (m.sources || []).length ? (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, opacity: 0.8 }}>Sources</div>
+                  <ul style={{ marginTop: 6 }}>
+                    {(m.sources || []).slice(0, 8).map((s, sIdx) => (
+                      <li key={sIdx} style={{ fontSize: 13, marginTop: 4 }}>
+                        <a href={s.url} target="_blank" rel="noreferrer">
+                          {s.title || s.url}
+                        </a>
+                        {s.snippet ? <div style={{ opacity: 0.8 }}>{s.snippet}</div> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          ))}
+
+          {loading ? <div style={{ marginTop: 10, opacity: 0.8 }}>Thinking…</div> : null}
+          <div ref={chatEndRef} />
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <textarea
+            className="input"
+            style={{ flex: 1, minHeight: 44, resize: "vertical" }}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Type your question…"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                ask().catch(() => null);
+              }
+            }}
+          />
+          <button className="btnPrimary" type="button" disabled={loading} onClick={() => ask().catch(() => null)}>
+            {loading ? "Asking…" : "Ask"}
+          </button>
+        </div>
+
+        <details style={{ marginTop: 10 }}>
+          <summary style={{ cursor: "pointer", opacity: 0.85 }}>Advanced</summary>
+          <div style={{ marginTop: 10 }}>
+            <div className="field">
+              <div className="fieldLabel">Model override (optional)</div>
+              <input
+                className="input"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="leave blank for backend default"
+              />
+            </div>
           </div>
-        ) : null}
+        </details>
       </div>
 
-      <div className="panel" style={{ marginTop: 14 }}>
-        <div className="panelTitle">Create Skill</div>
-        <div className="panelSub">Saves the current query as a reusable skill (appears as websearch_&lt;id&gt; in skills_config).</div>
+      {/* Turn into skill */}
+      <div className="panelInset" style={{ marginTop: 12 }}>
+        <div style={{ fontWeight: 600 }}>Turn this into a skill (optional)</div>
+        <div style={{ opacity: 0.8, fontSize: 13, marginTop: 6 }}>
+          This saves the last asked question as a Web Search skill and makes it available elsewhere in the portal.
+        </div>
 
         <div className="form" style={{ marginTop: 12 }}>
           <div className="field">
             <div className="fieldLabel">Skill name</div>
-            <input className="input" value={newSkillName} onChange={(e) => setNewSkillName(e.target.value)} placeholder="e.g., NYC Parking Report" />
+            <input className="input" value={newSkillName} onChange={(e) => setNewSkillName(e.target.value)} placeholder="NYC Alternate Side Parking" />
           </div>
+
           <div className="field">
-            <div className="fieldLabel">Triggers (optional, comma-separated)</div>
-            <input className="input" value={newSkillTriggers} onChange={(e) => setNewSkillTriggers(e.target.value)} placeholder="e.g., parking, alternate side, nyc" />
+            <div className="fieldLabel">Trigger phrases (comma-separated)</div>
+            <input
+              className="input"
+              value={newSkillTriggers}
+              onChange={(e) => setNewSkillTriggers(e.target.value)}
+              placeholder="alternate side parking, ASP rules"
+            />
           </div>
 
           <div className="actions">
-            <button className="btnPrimary" type="button" disabled={loading} onClick={createSkillFromCurrentQuery}>
-              {loading ? "Working…" : "Create Skill"}
+            <button className="btnPrimary" type="button" disabled={loading} onClick={() => createSkillFromCurrentQuery().catch(() => null)}>
+              {loading ? "Saving…" : "Create Skill"}
+            </button>
+            <button className="btnSecondary" type="button" disabled={loading} onClick={() => refreshLists().catch(() => null)}>
+              Refresh
             </button>
           </div>
         </div>
-
-        <div style={{ marginTop: 12 }}>
-          <div className="fieldLabel">Existing WebSearch Skills</div>
-          {skillOptions.length ? (
-            <div className="list">
-              {skillOptions.map((s) => (
-                <div key={s.id} className="rowCard">
-                  <div style={{ minWidth: 0 }}>
-                    <div className="rowTitle">{s.name}</div>
-                    <div className="rowSub">
-                      <span className="mono">{s.skill_key}</span> · enabled={String(!!s.enabled)}
-                    </div>
-                    <div className="muted" style={{ marginTop: 6 }}>
-                      {s.query}
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                    <button className="btnSecondary" type="button" onClick={() => setSelectedSkillId(s.id)}>
-                      Use for Schedule
-                    </button>
-                    <button className="btnSecondary" type="button" disabled={loading} onClick={() => deleteSkill(s.id)}>
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="muted" style={{ marginTop: 8 }}>
-              No websearch skills yet.
-            </div>
-          )}
-        </div>
       </div>
 
-      <div className="panel" style={{ marginTop: 14 }}>
-        <div className="panelTitle">Schedule Delivery</div>
-        <div className="panelSub">
-          Requires the backend scheduled worker to be running. For initial testing you can set NOTIFY_DRY_RUN=1 on backend+worker.
+      {/* Scheduling */}
+      <div className="panelInset" style={{ marginTop: 12 }}>
+        <div style={{ fontWeight: 600 }}>Schedule delivery (optional)</div>
+        <div style={{ opacity: 0.8, fontSize: 13, marginTop: 6 }}>
+          Schedule a saved Web Search skill for daily delivery via Email (or SMS if configured).
         </div>
 
         <div className="form" style={{ marginTop: 12 }}>
           <div className="field">
-            <div className="fieldLabel">Skill</div>
+            <div className="fieldLabel">Saved skill</div>
             <select className="input" value={selectedSkillId} onChange={(e) => setSelectedSkillId(e.target.value)}>
-              <option value="">(select a skill)</option>
+              <option value="">Select…</option>
               {skillOptions.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.name} ({s.id.slice(0, 8)})
+                  {s.name}
                 </option>
               ))}
             </select>
           </div>
 
-          <div className="field">
-            <div className="fieldLabel">Time of day</div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <input className="input" style={{ maxWidth: 120 }} value={hour} onChange={(e) => setHour(e.target.value)} placeholder="hour" />
-              <input className="input" style={{ maxWidth: 120 }} value={minute} onChange={(e) => setMinute(e.target.value)} placeholder="minute" />
+          <div className="field" style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <div className="fieldLabel">Hour (0–23)</div>
+              <input className="input" value={hour} onChange={(e) => setHour(e.target.value)} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div className="fieldLabel">Minute (0–59)</div>
+              <input className="input" value={minute} onChange={(e) => setMinute(e.target.value)} />
             </div>
           </div>
 
@@ -420,80 +533,119 @@ export default function WebSearchMvpPanel() {
           </div>
 
           <div className="field">
-            <div className="fieldLabel">Destination</div>
-            <input className="input" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="email or phone number" />
+            <div className="fieldLabel">Destination (email or phone number)</div>
+            <input className="input" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="yasinc74@gmail.com or +1917..." />
           </div>
 
           <div className="actions">
-            <button className="btnPrimary" type="button" disabled={loading} onClick={upsertSchedule}>
+            <button className="btnPrimary" type="button" disabled={loading} onClick={() => upsertSchedule().catch(() => null)}>
               {loading ? "Saving…" : "Save Schedule"}
+            </button>
+            <button className="btnSecondary" type="button" disabled={loading} onClick={() => refreshLists().catch(() => null)}>
+              Refresh
             </button>
           </div>
         </div>
+      </div>
 
-        <div style={{ marginTop: 12 }}>
-          <div className="fieldLabel">Existing Schedules</div>
-          {schedules.length ? (
-            <table className="table" style={{ marginTop: 10 }}>
-              <thead>
-                <tr>
-                  <th>Skill</th>
-                  <th>Time</th>
-                  <th>TZ</th>
-                  <th>Channel</th>
-                  <th>Destination</th>
-                  <th>Next</th>
-                  <th>Last</th>
-                </tr>
-              </thead>
-              <tbody>
-                {schedules.map((r) => (
-                  <tr key={r.id}>
-                    <td className="mono">{r.web_search_skill_id.slice(0, 8)}</td>
-                    <td className="mono">{r.time_of_day}</td>
-                    <td className="mono">{r.timezone}</td>
-                    <td className="mono">{r.channel}</td>
-                    <td className="mono">{r.destination}</td>
-                    <td className="mono">{r.next_run_at || ""}</td>
-                    <td className="mono">{r.last_run_at || ""}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {/* Quick view */}
+      <details style={{ marginTop: 12 }}>
+        <summary style={{ cursor: "pointer", opacity: 0.85 }}>Saved Web Search skills & schedules (quick view)</summary>
+
+        <div className="panelInset" style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 600 }}>Saved skills</div>
+          {skills.length === 0 ? (
+            <div style={{ opacity: 0.8, marginTop: 8 }}>No saved Web Search skills yet.</div>
           ) : (
-            <div className="muted" style={{ marginTop: 8 }}>
-              No schedules yet.
+            <div style={{ marginTop: 10 }}>
+              {skills.map((s) => (
+                <div key={s.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderBottom: "1px solid rgba(0,0,0,0.06)" }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600 }}>{s.name}</div>
+                    <div style={{ opacity: 0.8, fontSize: 13 }}>{s.query}</div>
+                    {(s.triggers || []).length ? <div style={{ opacity: 0.7, fontSize: 12 }}>triggers: {(s.triggers || []).join(", ")}</div> : null}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <button className="btnSecondary" type="button" onClick={() => setSelectedSkillId(s.id)}>
+                      Select
+                    </button>
+                    <button className="btnDanger" type="button" disabled={loading} onClick={() => deleteSkill(s.id).catch(() => null)}>
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>
-      </div>
 
-      <div className="panel" style={{ marginTop: 14 }}>
-        <div className="panelTitle">Send Test Notification</div>
-        <div className="panelSub">Uses Control Plane proxy endpoints. Useful before scheduling.</div>
-
-        <div className="form" style={{ marginTop: 12 }}>
-          <div className="field">
-            <div className="fieldLabel">Test Email To</div>
-            <input className="input" value={testEmailTo} onChange={(e) => setTestEmailTo(e.target.value)} placeholder="you@example.com" />
-            <div className="actions" style={{ marginTop: 10 }}>
-              <button className="btnSecondary" type="button" disabled={loading} onClick={sendTestEmail}>
-                Send Test Email
-              </button>
+        <div className="panelInset" style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 600 }}>Saved schedules</div>
+          {schedules.length === 0 ? (
+            <div style={{ opacity: 0.8, marginTop: 8 }}>No schedules yet.</div>
+          ) : (
+            <div style={{ marginTop: 10 }}>
+              {schedules.map((r) => (
+                <div key={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderBottom: "1px solid rgba(0,0,0,0.06)" }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600 }}>
+                      {r.channel} → {r.destination}
+                    </div>
+                    <div style={{ opacity: 0.8, fontSize: 13 }}>
+                      {r.cadence} · {r.time_of_day} · {r.timezone}
+                    </div>
+                    {r.next_run_at ? <div style={{ opacity: 0.7, fontSize: 12 }}>next: {formatWhenIso(r.next_run_at)}</div> : null}
+                    {r.last_run_at ? <div style={{ opacity: 0.7, fontSize: 12 }}>last: {formatWhenIso(r.last_run_at)}</div> : null}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <button className="btnDanger" type="button" disabled={loading} onClick={() => deleteSchedule(r.id).catch(() => null)}>
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
-          </div>
+          )}
+        </div>
+      </details>
 
-          <div className="field">
-            <div className="fieldLabel">Test SMS To</div>
-            <input className="input" value={testSmsTo} onChange={(e) => setTestSmsTo(e.target.value)} placeholder="+1..." />
-            <div className="actions" style={{ marginTop: 10 }}>
-              <button className="btnSecondary" type="button" disabled={loading} onClick={sendTestSms}>
-                Send Test SMS
+      {/* Test notifications */}
+      <details style={{ marginTop: 12 }}>
+        <summary style={{ cursor: "pointer", opacity: 0.85 }}>Test notifications (optional)</summary>
+
+        <div className="panelInset" style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 600 }}>Send a test email</div>
+          <div className="form" style={{ marginTop: 10 }}>
+            <div className="field">
+              <div className="fieldLabel">To</div>
+              <input className="input" value={testEmailTo} onChange={(e) => setTestEmailTo(e.target.value)} placeholder="your@email.com" />
+            </div>
+            <div className="actions">
+              <button className="btnPrimary" type="button" disabled={loading} onClick={() => sendTestEmail().catch(() => null)}>
+                {loading ? "Sending…" : "Send Email"}
               </button>
             </div>
           </div>
         </div>
-      </div>
+
+        <div className="panelInset" style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 600 }}>Send a test SMS</div>
+          <div style={{ opacity: 0.8, fontSize: 13, marginTop: 6 }}>
+            Requires a working SMS provider (e.g., Twilio A2P-approved sender).
+          </div>
+          <div className="form" style={{ marginTop: 10 }}>
+            <div className="field">
+              <div className="fieldLabel">To</div>
+              <input className="input" value={testSmsTo} onChange={(e) => setTestSmsTo(e.target.value)} placeholder="+1917..." />
+            </div>
+            <div className="actions">
+              <button className="btnPrimary" type="button" disabled={loading} onClick={() => sendTestSms().catch(() => null)}>
+                {loading ? "Sending…" : "Send SMS"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </details>
     </div>
   );
 }
