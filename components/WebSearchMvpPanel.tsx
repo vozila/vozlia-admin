@@ -21,7 +21,7 @@ type WebSearchSkill = {
   skill_key: string;
   name: string;
   query: string;
-  triggers: string[];
+  triggers?: string[];
   enabled: boolean;
 };
 
@@ -29,94 +29,129 @@ type WebSearchSchedule = {
   id: string;
   web_search_skill_id: string;
   enabled: boolean;
-  cadence: string; // "daily" (MVP)
+  cadence: string;
   time_of_day: string; // "HH:MM"
   timezone: string;
-  channel: string; // "email" | "sms" (MVP)
+  channel: string;
   destination: string;
   next_run_at?: string | null;
   last_run_at?: string | null;
 };
 
-type ChatRole = "user" | "assistant" | "system";
 type ChatMsg = {
-  id: string;
-  role: ChatRole;
+  role: "user" | "assistant";
   text: string;
-  meta?: {
-    sources?: WebSearchSource[];
-    model?: string | null;
-    latency_ms?: number | null;
-  };
+  meta?: { model?: string | null; latency_ms?: number | null };
+  sources?: WebSearchSource[];
 };
 
-function uid(prefix: string) {
-  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
-}
-
-function parseCsv(raw: string): string[] {
+function parseTriggers(raw: string): string[] {
   return (raw || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 }
 
-function hmFromTimeOfDay(timeOfDay: string): { hour: number; minute: number } {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(timeOfDay || "");
-  if (!m) return { hour: 7, minute: 0 };
-  const hour = Math.max(0, Math.min(23, Number(m[1])));
-  const minute = Math.max(0, Math.min(59, Number(m[2])));
-  return { hour, minute };
+function formatWhenIso(iso?: string | null): string {
+  if (!iso) return "";
+  return iso.replace("T", " ").replace("Z", "");
 }
 
-function scheduleSummary(s: WebSearchSchedule | null | undefined): string {
-  if (!s) return "Not scheduled";
-  const when = `${s.cadence || "daily"} · ${s.time_of_day} · ${s.timezone}`;
-  const where = `${s.channel} → ${s.destination}`;
-  const onOff = s.enabled ? "On" : "Off";
-  return `${onOff} · ${when} · ${where}`;
+function safeTimeParts(timeOfDay?: string | null): { hour: string; minute: string } {
+  const raw = (timeOfDay || "").trim();
+  const m = raw.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return { hour: "7", minute: "0" };
+  return { hour: String(Number(m[1])), minute: String(Number(m[2])) };
+}
+
+function clampText(s: string, max: number): string {
+  const t = (s || "").trim();
+  if (t.length <= max) return t;
+  return t.slice(0, max - 1) + "…";
+}
+
+function scheduleSummary(s: WebSearchSchedule | null): string {
+  if (!s) return "No schedule yet";
+  const enabled = s.enabled ? "On" : "Off";
+  const cadence = s.cadence || "daily";
+  const when = `${s.time_of_day} ${s.timezone}`;
+  const chan = `${s.channel} → ${s.destination}`;
+  return `${enabled} · ${cadence} · ${when} · ${chan}`;
 }
 
 export default function WebSearchMvpPanel() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Chat
-  const [draft, setDraft] = useState("");
-  const [messages, setMessages] = useState<ChatMsg[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      text: "Tell me what you want. I can answer quickly, and if you want it as a recurring report I can save it as an automation (email/SMS).",
-    },
-  ]);
-  const messagesRef = useRef<HTMLDivElement | null>(null);
-
-  // Advanced (optional)
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  // Chat input + optional model override.
+  const [query, setQuery] = useState("");
   const [model, setModel] = useState("");
 
-  // Last run (used for “Save as automation”)
-  const [lastQuery, setLastQuery] = useState<string>("");
-  const [lastAnswer, setLastAnswer] = useState<string>("");
+  // Most recent backend result (used by "Save as skill").
+  const [runOut, setRunOut] = useState<WebSearchRunOut | null>(null);
 
-  // Skills + schedules
+  // Chat transcript (UI-only; source of truth is backend).
+  const [chat, setChat] = useState<ChatMsg[]>([]);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Saved skills + schedules.
   const [skills, setSkills] = useState<WebSearchSkill[]>([]);
   const [schedules, setSchedules] = useState<WebSearchSchedule[]>([]);
 
-  // Save skill modal
-  const [saveOpen, setSaveOpen] = useState(false);
-  const [newSkillName, setNewSkillName] = useState("");
-  const [newSkillTriggers, setNewSkillTriggers] = useState("");
+  const scheduleBySkillId = useMemo(() => {
+    const m = new Map<string, WebSearchSchedule>();
+    for (const s of schedules) m.set(s.web_search_skill_id, s);
+    return m;
+  }, [schedules]);
 
-  // Manage card modal
-  const [manageOpen, setManageOpen] = useState(false);
-  const [manageSkillId, setManageSkillId] = useState<string>("");
-  const [hour, setHour] = useState("7");
-  const [minute, setMinute] = useState("0");
-  const [timezone, setTimezone] = useState("America/New_York");
-  const [channel, setChannel] = useState("email");
-  const [destination, setDestination] = useState("");
+  // "Save as skill" modal.
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [saveTriggers, setSaveTriggers] = useState("");
+  const [saveShowTriggers, setSaveShowTriggers] = useState(false);
+
+  // Skill detail modal (schedule editing).
+  const [detailSkillId, setDetailSkillId] = useState<string | null>(null);
+  const detailSkill = useMemo(() => skills.find((s) => s.id === detailSkillId) || null, [skills, detailSkillId]);
+  const detailSchedule = useMemo(() => (detailSkillId ? scheduleBySkillId.get(detailSkillId) || null : null), [detailSkillId, scheduleBySkillId]);
+
+  const [schedHour, setSchedHour] = useState("7");
+  const [schedMinute, setSchedMinute] = useState("0");
+  const [schedTimezone, setSchedTimezone] = useState("America/New_York");
+  const [schedChannel, setSchedChannel] = useState("email");
+  const [schedDestination, setSchedDestination] = useState("");
+
+  useEffect(() => {
+    // Keep the chat pinned to the latest messages.
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [chat, loading]);
+
+  useEffect(() => {
+    refreshLists().catch(() => null);
+  }, []);
+
+  useEffect(() => {
+    // When opening a skill, prefill the schedule editor from existing schedule (if any).
+    if (!detailSkillId) return;
+
+    const s = scheduleBySkillId.get(detailSkillId) || null;
+    if (s) {
+      const t = safeTimeParts(s.time_of_day);
+      setSchedHour(t.hour);
+      setSchedMinute(t.minute);
+      setSchedTimezone(s.timezone || "America/New_York");
+      setSchedChannel(s.channel || "email");
+      setSchedDestination(s.destination || "");
+      return;
+    }
+
+    // Defaults for a new schedule.
+    setSchedHour("7");
+    setSchedMinute("0");
+    setSchedTimezone("America/New_York");
+    setSchedChannel("email");
+    setSchedDestination("");
+  }, [detailSkillId, scheduleBySkillId]);
 
   async function refreshLists() {
     const [skillsRes, schedRes] = await Promise.all([
@@ -127,109 +162,96 @@ export default function WebSearchMvpPanel() {
     const skillsData = await skillsRes.json().catch(() => []);
     const schedData = await schedRes.json().catch(() => []);
 
-    if (skillsRes.ok) setSkills(Array.isArray(skillsData) ? skillsData : []);
-    if (schedRes.ok) setSchedules(Array.isArray(schedData) ? schedData : []);
+    if (skillsRes.ok) setSkills(Array.isArray(skillsData) ? (skillsData as WebSearchSkill[]) : []);
+    if (schedRes.ok) setSchedules(Array.isArray(schedData) ? (schedData as WebSearchSchedule[]) : []);
   }
 
-  useEffect(() => {
-    refreshLists().catch(() => null);
-  }, []);
-
-  useEffect(() => {
-    // Auto-scroll to bottom on new messages
-    const el = messagesRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [messages]);
-
-  const cards = useMemo(() => {
-    const schedBySkill = new Map<string, WebSearchSchedule>();
-    for (const s of schedules) {
-      // MVP: assume 1 schedule per skill; keep first enabled else first
-      if (!schedBySkill.has(s.web_search_skill_id)) {
-        schedBySkill.set(s.web_search_skill_id, s);
-      }
-    }
-    return skills
-      .slice()
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((sk) => ({ skill: sk, schedule: schedBySkill.get(sk.id) || null }));
-  }, [skills, schedules]);
-
-  function pushMsg(m: ChatMsg) {
-    setMessages((cur) => [...cur, m]);
-  }
-
-  async function runSearch(qRaw: string) {
+  async function ask() {
     setErr(null);
-    const q = (qRaw || "").trim();
+    const q = query.trim();
     if (!q) return;
+
+    // Append user's message immediately.
+    setChat((prev) => [...prev, { role: "user", text: q }]);
+    setQuery("");
 
     setLoading(true);
     try {
-      const res = await fetch("/api/admin/websearch/search", {
+            const history = [...chat, { role: "user" as const, text: q }];
+      const res = await fetch("/api/admin/wizard/turn", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: q, model: model.trim() || null }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || "Search failed");
-
-      const out = data as WebSearchRunOut;
-      setLastQuery(out.query || q);
-      setLastAnswer(out.answer || "");
-
-      pushMsg({
-        id: uid("assistant"),
-        role: "assistant",
-        text: out.answer || "(No answer returned.)",
-        meta: { sources: out.sources || [], model: out.model ?? null, latency_ms: out.latency_ms ?? null },
+        body: JSON.stringify({
+          message: q,
+          messages: history.map((m) => ({ role: m.role, content: m.text })),
+        }),
       });
 
-      // Subtle inline hint (no buttons, stays chat-like)
-      pushMsg({
-        id: uid("system"),
-        role: "system",
-        text: "If you want this as a recurring report, click “Save as automation” below the chat, or tell me in chat: “save this as an automation”.",
+      const out = await res.json();
+      if (!res.ok) throw new Error(out?.error || "Wizard request failed");
+
+      // If the wizard executed a web search, surface citations (sources) in the UI.
+      let sources: any[] = [];
+      try {
+        for (const a of out?.actions_executed || []) {
+          if (a?.type === "websearch_run" && a?.result?.sources) {
+            sources = a.result.sources;
+            break;
+          }
+        }
+      } catch {}
+
+      setRunOut({
+        query: q,
+        answer: out.reply ?? "",
+        sources,
       });
+
+      // Refresh saved skills/schedules from the wizard response (fallback: keep existing).
+      if (Array.isArray(out.websearch_skills)) setSkills(out.websearch_skills);
+      if (Array.isArray(out.websearch_schedules)) setSchedules(out.websearch_schedules);
+
+      setChat((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: out.reply ?? "",
+          sources,
+        },
+      ]);
     } catch (e: any) {
-      setErr(String(e?.message ?? e));
-      pushMsg({
-        id: uid("assistant"),
-        role: "assistant",
-        text: `Sorry — I couldn't complete that. ${String(e?.message ?? e)}`,
-      });
+      const msg = String(e?.message ?? e);
+      setErr(msg);
+      setChat((prev) => [...prev, { role: "assistant", text: `Sorry — I hit an error: ${msg}` }]);
     } finally {
       setLoading(false);
     }
   }
 
-  async function onSend() {
-    const text = (draft || "").trim();
-    if (!text) return;
-
-    setDraft("");
-    pushMsg({ id: uid("user"), role: "user", text });
-
-    // MVP command: “save this …” opens the save modal
-    if (/^save\b/i.test(text) || /save this/i.test(text) || /create.*automation/i.test(text)) {
-      setSaveOpen(true);
+  function openSaveSkill() {
+    const q = (runOut?.query || "").trim();
+    if (!q) {
+      setErr("Ask a question first, then save it as a skill.");
       return;
     }
-
-    await runSearch(text);
+    setErr(null);
+    // Reasonable defaults.
+    setSaveName((prev) => prev || `WebSearch: ${clampText(q, 48)}`);
+    setSaveTriggers("");
+    setSaveShowTriggers(false);
+    setSaveOpen(true);
   }
 
-  async function createSkillFromLastQuery() {
+  async function createSkillFromLastQuestion() {
     setErr(null);
-    const q = (lastQuery || "").trim();
+    const q = (runOut?.query || "").trim();
     if (!q) {
-      setErr("Ask a question first so there’s something to save.");
+      setErr("Ask a question first.");
       return;
     }
 
-    const name = (newSkillName || "").trim() || `Automation: ${q.slice(0, 48)}`;
-    const triggers = parseCsv(newSkillTriggers);
+    const name = (saveName || "").trim() || `WebSearch: ${clampText(q, 48)}`;
+    const triggers = parseTriggers(saveTriggers);
 
     setLoading(true);
     try {
@@ -239,20 +261,21 @@ export default function WebSearchMvpPanel() {
         body: JSON.stringify({ name, query: q, triggers }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || "Create skill failed");
+      if (!res.ok) throw new Error((data as any)?.detail || (data as any)?.error || "Create skill failed");
 
+      // Refresh and open the detail modal for quick scheduling.
       await refreshLists();
       if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
 
+      const createdId = (data as any)?.id as string | undefined;
       setSaveOpen(false);
-      setNewSkillName("");
-      setNewSkillTriggers("");
 
-      pushMsg({
-        id: uid("assistant"),
-        role: "assistant",
-        text: `Saved. I created an automation called “${name}”. You can set delivery (email/SMS + schedule) from the card below.`,
-      });
+      // Prefer the returned id, otherwise attempt to find by name+query after refresh.
+      if (createdId) setDetailSkillId(createdId);
+      else {
+        const match = skills.find((s) => s.name === name && s.query === q);
+        if (match) setDetailSkillId(match.id);
+      }
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     } finally {
@@ -260,40 +283,13 @@ export default function WebSearchMvpPanel() {
     }
   }
 
-  function openManage(skillId: string) {
-    const sk = skills.find((s) => s.id === skillId) || null;
-    const sc = schedules.find((s) => s.web_search_skill_id === skillId) || null;
-
-    setManageSkillId(skillId);
-
-    // Prefill delivery fields from schedule if present; else sensible defaults
-    if (sc) {
-      const { hour, minute } = hmFromTimeOfDay(sc.time_of_day);
-      setHour(String(hour));
-      setMinute(String(minute));
-      setTimezone(sc.timezone || "America/New_York");
-      setChannel(sc.channel || "email");
-      setDestination(sc.destination || "");
-    } else {
-      setHour("7");
-      setMinute("0");
-      setTimezone("America/New_York");
-      setChannel("email");
-      setDestination("");
-    }
-
-    setManageOpen(true);
-  }
-
-  async function upsertSchedule() {
+  async function upsertScheduleForOpenSkill() {
     setErr(null);
-    if (!manageSkillId) {
-      setErr("No skill selected.");
-      return;
-    }
+    if (!detailSkillId) return;
 
-    const h = Number(hour);
-    const m = Number(minute);
+    const h = Number(schedHour);
+    const m = Number(schedMinute);
+
     if (!Number.isFinite(h) || h < 0 || h > 23) {
       setErr("Hour must be 0–23.");
       return;
@@ -302,7 +298,7 @@ export default function WebSearchMvpPanel() {
       setErr("Minute must be 0–59.");
       return;
     }
-    if (!destination.trim()) {
+    if (!schedDestination.trim()) {
       setErr("Destination is required (email or phone number).");
       return;
     }
@@ -313,26 +309,19 @@ export default function WebSearchMvpPanel() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          web_search_skill_id: manageSkillId,
+          web_search_skill_id: detailSkillId,
           hour: h,
           minute: m,
-          timezone: (timezone || "").trim() || "America/New_York",
-          channel,
-          destination: destination.trim(),
+          timezone: schedTimezone.trim() || "America/New_York",
+          channel: schedChannel,
+          destination: schedDestination.trim(),
         }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || "Schedule failed");
+      if (!res.ok) throw new Error((data as any)?.detail || (data as any)?.error || "Schedule failed");
 
       await refreshLists();
       if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
-
-      setManageOpen(false);
-      pushMsg({
-        id: uid("assistant"),
-        role: "assistant",
-        text: `Scheduled. I’ll deliver that automation via ${channel} to ${destination.trim()} at ${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")} (${timezone || "America/New_York"}).`,
-      });
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     } finally {
@@ -340,35 +329,33 @@ export default function WebSearchMvpPanel() {
     }
   }
 
-  const manageSkill = useMemo(() => skills.find((s) => s.id === manageSkillId) || null, [skills, manageSkillId]);
-  const manageSchedule = useMemo(
-    () => schedules.find((s) => s.web_search_skill_id === manageSkillId) || null,
-    [schedules, manageSkillId]
-  );
+  async function deleteSkill(id: string) {
+    if (!id) return;
+    if (!confirm("Delete this skill? This cannot be undone.")) return;
+
+    setErr(null);
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/admin/websearch/skills/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as any)?.detail || (data as any)?.error || "Delete failed");
+      await refreshLists();
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("vozlia:websearch-updated"));
+      setDetailSkillId(null);
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
     <div className="panel">
-      <div className="wizardTop">
-        <div>
-          <div className="panelTitle">Chat</div>
-          <div className="panelSub">Ask anything. If it’s useful as a recurring report, save it as an automation.</div>
-        </div>
-        <button className="btnTertiary" type="button" onClick={() => setShowAdvanced((v) => !v)}>
-          {showAdvanced ? "Hide" : "Show"} advanced
-        </button>
+      <div className="panelTitle">Configuration Wizard</div>
+      <div className="panelSub">
+        Chat-first setup. Ask a question → get an answer → optionally save it as a skill → click the skill card to schedule delivery.
+        <span style={{ opacity: 0.7 }}> (Currently: Web Search.)</span>
       </div>
-
-      {showAdvanced ? (
-        <div className="panelInset" style={{ marginTop: 12 }}>
-          <div className="field">
-            <div className="fieldLabel">Model (optional)</div>
-            <input className="input" value={model} onChange={(e) => setModel(e.target.value)} placeholder="leave blank for backend default" />
-          </div>
-          <div className="rowSub" style={{ marginTop: 8 }}>
-            Tip: Leave this blank unless you’re testing models.
-          </div>
-        </div>
-      ) : null}
 
       {err ? (
         <div className="alert" style={{ marginTop: 12 }}>
@@ -377,341 +364,455 @@ export default function WebSearchMvpPanel() {
         </div>
       ) : null}
 
-      <div className="chatShell" style={{ marginTop: 12 }}>
-        <div className="chatMessages" ref={messagesRef}>
-          {messages.map((m) => (
-            <div key={m.id} className={`chatMsg ${m.role}`}>
-              <div className="chatBubble">
-                <div style={{ whiteSpace: "pre-wrap" }}>{m.text}</div>
-                {m.role === "assistant" && (m.meta?.model || m.meta?.latency_ms != null) ? (
-                  <div className="chatMeta">
-                    {m.meta?.model ? `model=${m.meta.model}` : ""}
-                    {m.meta?.latency_ms != null ? ` · latency_ms=${Math.round(m.meta.latency_ms)}` : ""}
-                  </div>
-                ) : null}
-                {m.role === "assistant" && (m.meta?.sources || []).length ? (
-                  <details className="chatSources">
-                    <summary>Sources</summary>
-                    <ul style={{ margin: "8px 0 0 18px" }}>
-                      {(m.meta?.sources || []).slice(0, 8).map((s, idx) => (
-                        <li key={idx}>
-                          <a href={s.url} target="_blank" rel="noreferrer" style={{ color: "var(--text)" }}>
-                            {s.title || s.url}
-                          </a>
-                          {s.snippet ? <div className="rowSub">{s.snippet}</div> : null}
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                ) : null}
-              </div>
-            </div>
-          ))}
+      {/* Chat console */}
+      <div className="wizardChatShell" style={{ marginTop: 12 }}>
+        <div className="wizardChatHeader">
+          <div style={{ fontWeight: 900 }}>Ask Vozlia</div>
+          <div className="muted" style={{ fontSize: 13 }}>
+            Tip: Ask something like <span className="mono">“Are alternate side parking rules in effect today in NYC?”</span>
+          </div>
         </div>
 
-        <div className="chatInputRow">
+        <div className="wizardChatWindow">
+          {chat.length === 0 ? (
+            <div style={{ opacity: 0.85, fontSize: 13 }}>
+              This is a chat-first wizard. Your legacy toggles and settings still exist elsewhere in the portal.
+            </div>
+          ) : null}
+
+          {chat.map((m, idx) => (
+            <div key={idx} className={`wizardMsg ${m.role === "user" ? "user" : "assistant"}`}>
+              <div className="wizardMsgMeta">{m.role === "user" ? "You" : "Vozlia"}</div>
+              <div className="wizardMsgBubble">{m.text}</div>
+
+              {m.role === "assistant" && (m.meta?.model || m.meta?.latency_ms != null) ? (
+                <div className="wizardMsgFoot">
+                  model={m.meta?.model || "(default)"} · latency_ms={m.meta?.latency_ms ?? "?"}
+                </div>
+              ) : null}
+
+              {m.role === "assistant" && (m.sources || []).length ? (
+                <details className="wizardSources">
+                  <summary>Sources</summary>
+                  <ul>
+                    {(m.sources || []).slice(0, 8).map((s, sIdx) => (
+                      <li key={sIdx}>
+                        <a href={s.url} target="_blank" rel="noreferrer">
+                          {s.title || s.url}
+                        </a>
+                        {s.snippet ? <div className="muted">{s.snippet}</div> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+            </div>
+          ))}
+
+          {loading ? <div style={{ marginTop: 10, opacity: 0.85 }}>Thinking…</div> : null}
+          <div ref={chatEndRef} />
+        </div>
+
+        <div className="wizardComposer">
           <textarea
-            className="chatInput"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Type your goal or question…"
+            className="input"
+            style={{ flex: 1, minHeight: 64, resize: "vertical" }}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Type your question…"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                onSend().catch(() => null);
+                ask().catch(() => null);
               }
             }}
           />
-          <button className="btnPrimary" type="button" disabled={loading} onClick={() => onSend().catch(() => null)}>
-            {loading ? "…" : "Send"}
+          <button className="btnPrimary" type="button" disabled={loading} onClick={() => ask().catch(() => null)}>
+            {loading ? "Asking…" : "Send"}
           </button>
         </div>
+
+        <div className="wizardActionBar">
+          <div className="muted" style={{ fontSize: 13 }}>
+            {runOut?.query ? (
+              <>
+                Last question saved in memory: <span className="mono">{clampText(runOut.query, 110)}</span>
+              </>
+            ) : (
+              <>Ask a question to enable skill creation.</>
+            )}
+          </div>
+
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <button className="btnSecondary" type="button" disabled={!runOut?.query || loading} onClick={openSaveSkill}>
+              Save as Skill
+            </button>
+            <button className="btnSecondary" type="button" disabled={loading} onClick={() => refreshLists().catch(() => null)}>
+              Refresh Skills
+            </button>
+          </div>
+        </div>
+
+        <details style={{ marginTop: 10 }}>
+          <summary style={{ cursor: "pointer", opacity: 0.85 }}>Advanced</summary>
+          <div className="panelInset" style={{ marginTop: 10 }}>
+            <div className="field">
+              <div className="fieldLabel">Model override (optional)</div>
+              <input
+                className="input"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="leave blank for backend default"
+              />
+            </div>
+          </div>
+        </details>
       </div>
 
-      <div className="actions" style={{ marginTop: 12 }}>
-        <button
-          className="btnSecondary"
-          type="button"
-          disabled={loading || !lastQuery}
-          onClick={() => {
-            setSaveOpen(true);
-          }}
-        >
-          Save as automation
-        </button>
-        <button className="btnSecondary" type="button" disabled={loading} onClick={() => refreshLists().catch(() => null)}>
-          Refresh
-        </button>
-      </div>
-
-      <div className="panelInset" style={{ marginTop: 12 }}>
-        <div className="row">
-          <div className="rowMain">
-            <div className="rowTitle">Automations</div>
-            <div className="rowSub">
-              Automations you’ve saved. Click a card to set delivery (schedule + channel).
+      {/* Skill cards */}
+      <div style={{ marginTop: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
+          <div>
+            <div style={{ fontWeight: 900 }}>Skills created by the wizard</div>
+            <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+              Click a card to view schedule details and delivery options.
             </div>
           </div>
         </div>
 
-        {cards.length ? (
-          <div className="autoGrid">
-            {cards.map(({ skill, schedule }) => (
-              <button key={skill.id} type="button" className="autoCard" onClick={() => openManage(skill.id)}>
-                <div>
-                  <div className="autoTitle">{skill.name}</div>
-                  <div className="autoMeta">{scheduleSummary(schedule)}</div>
-                </div>
-                <div className="autoFooter">
-                  <span className={`pill ${skill.enabled ? "pillOn" : "pillOff"}`}>{skill.enabled ? "Enabled" : "Disabled"}</span>
-                  <span className="autoSmall">Click to manage</span>
-                </div>
-              </button>
-            ))}
+        {skills.length === 0 ? (
+          <div className="muted" style={{ marginTop: 10 }}>
+            No saved skills yet. Ask a question above, then click <b>Save as Skill</b>.
           </div>
         ) : (
-          <div className="rowSub" style={{ marginTop: 10 }}>
-            No saved automations yet.
+          <div className="wizardGrid" style={{ marginTop: 12 }}>
+            {skills.map((s) => {
+              const sched = scheduleBySkillId.get(s.id) || null;
+              const hasSched = !!sched;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  className={`tile wizardCard ${hasSched ? "hasSched" : ""}`}
+                  onClick={() => setDetailSkillId(s.id)}
+                >
+                  <div className="wizardCardTop">
+                    <div className="wizardCardTitle">{s.name}</div>
+                    <span className={`pill ${s.enabled ? "pillOn" : "pillOff"}`}>{s.enabled ? "Enabled" : "Disabled"}</span>
+                  </div>
+
+                  <div className="wizardCardLine">{scheduleSummary(sched)}</div>
+
+                  <div className="wizardCardQuery" title={s.query}>
+                    {s.query}
+                  </div>
+
+                  <div className="wizardCardFoot mono">{clampText(s.skill_key, 34)}</div>
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
 
-      {/* Save modal */}
+      {/* Save as skill modal */}
       {saveOpen ? (
-        <div className="modalOverlay" onMouseDown={() => setSaveOpen(false)}>
-          <div className="modalCard" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="modalTitle">Save as automation</div>
-            <div className="rowSub" style={{ marginTop: 6 }}>
-              This will create an automation card from your most recent question.
+        <div className="wizardModalBackdrop" role="dialog" aria-modal="true">
+          <div className="wizardModal">
+            <div className="wizardModalHead">
+              <div style={{ fontWeight: 900, fontSize: 16 }}>Save as Skill</div>
+              <button className="btnSecondary" type="button" onClick={() => setSaveOpen(false)}>
+                Close
+              </button>
+            </div>
+
+            <div className="muted" style={{ fontSize: 13, marginTop: 6 }}>
+              This creates a reusable Web Search skill. After saving, click the skill card to schedule delivery.
             </div>
 
             <div className="field" style={{ marginTop: 12 }}>
-              <div className="fieldLabel">Name</div>
-              <input className="input" value={newSkillName} onChange={(e) => setNewSkillName(e.target.value)} placeholder="e.g., NYC Alternate Side Parking" />
+              <div className="fieldLabel">Skill name</div>
+              <input className="input" value={saveName} onChange={(e) => setSaveName(e.target.value)} />
             </div>
 
-            {showAdvanced ? (
+            <div style={{ marginTop: 10 }}>
+              <button className="btnSecondary" type="button" onClick={() => setSaveShowTriggers((v) => !v)}>
+                {saveShowTriggers ? "Hide triggers" : "Add triggers (optional)"}
+              </button>
+            </div>
+
+            {saveShowTriggers ? (
               <div className="field" style={{ marginTop: 10 }}>
-                <div className="fieldLabel">Triggers (optional, comma-separated)</div>
-                <input className="input" value={newSkillTriggers} onChange={(e) => setNewSkillTriggers(e.target.value)} placeholder="e.g., alternate side parking, ASP rules" />
-              </div>
-            ) : (
-              <div className="rowSub" style={{ marginTop: 10 }}>
-                Tip: Enable “advanced” if you want custom trigger phrases.
-              </div>
-            )}
-
-            <div className="actions" style={{ marginTop: 14 }}>
-              <button className="btnPrimary" type="button" disabled={loading} onClick={() => createSkillFromLastQuery().catch(() => null)}>
-                {loading ? "Saving…" : "Save"}
-              </button>
-              <button className="btnSecondary" type="button" disabled={loading} onClick={() => setSaveOpen(false)}>
-                Cancel
-              </button>
-            </div>
-
-            {lastQuery ? (
-              <div className="panelInset" style={{ marginTop: 12 }}>
-                <div className="rowSub">Saved query:</div>
-                <div style={{ marginTop: 6, whiteSpace: "pre-wrap", fontSize: 13 }}>{lastQuery}</div>
+                <div className="fieldLabel">Trigger phrases (comma-separated)</div>
+                <input className="input" value={saveTriggers} onChange={(e) => setSaveTriggers(e.target.value)} placeholder="alternate side parking, ASP rules" />
               </div>
             ) : null}
+
+            <div className="wizardModalActions">
+              <button className="btnPrimary" type="button" disabled={loading} onClick={() => createSkillFromLastQuestion().catch(() => null)}>
+                {loading ? "Saving…" : "Create Skill"}
+              </button>
+              <button className="btnSecondary" type="button" disabled={loading} onClick={() => refreshLists().catch(() => null)}>
+                Refresh
+              </button>
+            </div>
+
+            <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+              Question: <span className="mono">{clampText(runOut?.query || "", 160)}</span>
+            </div>
           </div>
         </div>
       ) : null}
 
-      {/* Manage modal */}
-      {manageOpen && manageSkill ? (
-        <div className="modalOverlay" onMouseDown={() => setManageOpen(false)}>
-          <div className="modalCard" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="modalTitle">{manageSkill.name}</div>
-            <div className="rowSub" style={{ marginTop: 6 }}>
-              {manageSchedule ? scheduleSummary(manageSchedule) : "Not scheduled yet"}
+      {/* Skill details modal */}
+      {detailSkillId && detailSkill ? (
+        <div className="wizardModalBackdrop" role="dialog" aria-modal="true">
+          <div className="wizardModal">
+            <div className="wizardModalHead">
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 900, fontSize: 16 }}>{detailSkill.name}</div>
+                <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+                  {detailSkill.query}
+                </div>
+              </div>
+              <button className="btnSecondary" type="button" onClick={() => setDetailSkillId(null)}>
+                Close
+              </button>
             </div>
 
             <div className="panelInset" style={{ marginTop: 12 }}>
-              <div className="field">
-                <div className="fieldLabel">Time</div>
-                <div style={{ display: "flex", gap: 10 }}>
-                  <input className="input" value={hour} onChange={(e) => setHour(e.target.value)} style={{ width: 90 }} />
-                  <input className="input" value={minute} onChange={(e) => setMinute(e.target.value)} style={{ width: 90 }} />
-                  <input className="input" value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder="America/New_York" />
-                </div>
-                <div className="rowSub" style={{ marginTop: 6 }}>
-                  Hour is 0–23, minute is 0–59. Timezone must be an IANA TZ string.
-                </div>
+              <div style={{ fontWeight: 900 }}>Schedule</div>
+              <div className="muted" style={{ fontSize: 13, marginTop: 6 }}>
+                {detailSchedule ? (
+                  <>
+                    <div>
+                      Current: <span className="mono">{scheduleSummary(detailSchedule)}</span>
+                    </div>
+                    {detailSchedule.next_run_at ? (
+                      <div style={{ marginTop: 4 }}>
+                        Next run: <span className="mono">{formatWhenIso(detailSchedule.next_run_at)}</span>
+                      </div>
+                    ) : null}
+                    {detailSchedule.last_run_at ? (
+                      <div style={{ marginTop: 4 }}>
+                        Last run: <span className="mono">{formatWhenIso(detailSchedule.last_run_at)}</span>
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <>No schedule yet.</>
+                )}
               </div>
 
-              <div className="field" style={{ marginTop: 10 }}>
-                <div className="fieldLabel">Delivery</div>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <select className="input" value={channel} onChange={(e) => setChannel(e.target.value)} style={{ width: 140 }}>
+              <div className="form" style={{ marginTop: 12 }}>
+                <div className="field" style={{ display: "flex", gap: 8 }}>
+                  <div style={{ flex: 1 }}>
+                    <div className="fieldLabel">Hour (0–23)</div>
+                    <input className="input" value={schedHour} onChange={(e) => setSchedHour(e.target.value)} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div className="fieldLabel">Minute (0–59)</div>
+                    <input className="input" value={schedMinute} onChange={(e) => setSchedMinute(e.target.value)} />
+                  </div>
+                </div>
+
+                <div className="field">
+                  <div className="fieldLabel">Timezone</div>
+                  <input className="input" value={schedTimezone} onChange={(e) => setSchedTimezone(e.target.value)} />
+                </div>
+
+                <div className="field">
+                  <div className="fieldLabel">Delivery channel</div>
+                  <select className="input" value={schedChannel} onChange={(e) => setSchedChannel(e.target.value)}>
                     <option value="email">email</option>
                     <option value="sms">sms</option>
+                    <option value="whatsapp">whatsapp</option>
+                    <option value="call">call</option>
                   </select>
-                  <input className="input" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder={channel === "email" ? "you@example.com" : "+15551234567"} style={{ minWidth: 260, flex: 1 }} />
                 </div>
-              </div>
 
-              <div className="actions" style={{ marginTop: 14 }}>
-                <button className="btnPrimary" type="button" disabled={loading} onClick={() => upsertSchedule().catch(() => null)}>
-                  {loading ? "Saving…" : manageSchedule ? "Update schedule" : "Create schedule"}
-                </button>
-                <button className="btnSecondary" type="button" disabled={loading} onClick={() => setManageOpen(false)}>
-                  Close
-                </button>
+                <div className="field">
+                  <div className="fieldLabel">Destination</div>
+                  <input className="input" value={schedDestination} onChange={(e) => setSchedDestination(e.target.value)} placeholder="email or phone number" />
+                </div>
+
+                <div className="actions">
+                  <button className="btnPrimary" type="button" disabled={loading} onClick={() => upsertScheduleForOpenSkill().catch(() => null)}>
+                    {loading ? "Saving…" : "Save Schedule"}
+                  </button>
+                  <button className="btnSecondary" type="button" disabled={loading} onClick={() => refreshLists().catch(() => null)}>
+                    Refresh
+                  </button>
+                </div>
               </div>
             </div>
 
             <details style={{ marginTop: 12 }}>
-              <summary className="rowSub">Show automation query</summary>
-              <div className="panelInset" style={{ marginTop: 8, whiteSpace: "pre-wrap", fontSize: 13 }}>
-                {manageSkill.query}
-              </div>
-              {manageSkill.triggers?.length ? (
-                <div className="rowSub" style={{ marginTop: 8 }}>
-                  Triggers: {manageSkill.triggers.join(", ")}
+              <summary style={{ cursor: "pointer", opacity: 0.85 }}>Advanced (danger zone)</summary>
+              <div className="panelInset" style={{ marginTop: 10 }}>
+                <div className="muted" style={{ fontSize: 13 }}>
+                  <div>
+                    Skill key: <span className="mono">{detailSkill.skill_key}</span>
+                  </div>
+                  {(detailSkill.triggers || []).length ? (
+                    <div style={{ marginTop: 6 }}>
+                      Triggers: <span className="mono">{(detailSkill.triggers || []).join(", ")}</span>
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
+
+                <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
+                  <button
+                    className="btnSecondary"
+                    type="button"
+                    disabled={loading}
+                    onClick={() => deleteSkill(detailSkill.id).catch(() => null)}
+                    style={{ borderColor: "rgba(239,68,68,0.35)", background: "rgba(239,68,68,0.06)", color: "#b91c1c" }}
+                  >
+                    Delete skill
+                  </button>
+                </div>
+              </div>
             </details>
           </div>
         </div>
       ) : null}
 
       <style jsx>{`
-        .wizardTop {
+        .wizardChatShell {
+          border: 1px solid rgba(0, 0, 0, 0.10);
+          border-radius: 16px;
+          background: rgba(255, 255, 255, 0.75);
+          padding: 14px;
+        }
+        .wizardChatHeader {
           display: flex;
           justify-content: space-between;
-          align-items: flex-start;
+          align-items: baseline;
           gap: 12px;
         }
-        .btnTertiary {
-          border: 1px solid var(--border);
-          background: transparent;
-          color: var(--muted);
-          border-radius: 999px;
-          padding: 8px 12px;
-          cursor: pointer;
-        }
-        .chatShell {
-          border: 1px solid var(--border);
-          background: var(--card);
-          border-radius: 18px;
-          overflow: hidden;
-          box-shadow: var(--shadow);
-        }
-        .chatMessages {
-          height: 520px;
-          overflow: auto;
-          padding: 14px;
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-        }
-        .chatMsg {
-          display: flex;
-        }
-        .chatMsg.user {
-          justify-content: flex-end;
-        }
-        .chatMsg.assistant {
-          justify-content: flex-start;
-        }
-        .chatMsg.system {
-          justify-content: center;
-        }
-        .chatBubble {
-          max-width: 86%;
-          border-radius: 16px;
-          padding: 10px 12px;
-          border: 1px solid var(--border);
-          background: var(--card);
-        }
-        .chatMsg.user .chatBubble {
-          background: var(--accentSoft);
-          border-color: rgba(6, 182, 212, 0.25);
-        }
-        .chatMsg.system .chatBubble {
-          border: none;
-          background: transparent;
-          color: var(--muted);
-          font-size: 12px;
-          padding: 0;
-          max-width: 92%;
-          text-align: center;
-        }
-        .chatMeta {
-          margin-top: 8px;
-          font-size: 12px;
-          color: var(--muted);
-        }
-        .chatSources {
+        .wizardChatWindow {
           margin-top: 10px;
-          font-size: 13px;
-          color: var(--muted);
-        }
-        .chatInputRow {
-          display: flex;
-          gap: 10px;
-          padding: 12px;
-          border-top: 1px solid var(--border);
-        }
-        .chatInput {
-          flex: 1;
-          border: 1px solid var(--border);
+          border: 1px solid rgba(0, 0, 0, 0.12);
           border-radius: 14px;
           padding: 12px;
-          font-size: 14px;
-          outline: none;
-          resize: vertical;
-          min-height: 54px;
-          max-height: 180px;
-          background: #fff;
+          height: 55vh;
+          overflow-y: auto;
+          background: rgba(0, 0, 0, 0.02);
         }
-
-        .autoGrid {
-          margin-top: 12px;
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-          gap: 14px;
-        }
-        .autoCard {
-          text-align: left;
-          border-radius: 16px;
-          border: 1px solid var(--border);
-          background: var(--card);
-          padding: 14px;
-          cursor: pointer;
-          box-shadow: var(--shadow);
+        .wizardComposer {
           display: flex;
-          flex-direction: column;
-          justify-content: space-between;
-          aspect-ratio: 1 / 1;
-        }
-        .autoTitle {
-          font-weight: 700;
-          font-size: 15px;
-          line-height: 1.25;
-        }
-        .autoMeta {
+          gap: 10px;
           margin-top: 10px;
-          font-size: 12px;
-          color: var(--muted);
-          line-height: 1.35;
+          align-items: flex-start;
         }
-        .autoFooter {
-          margin-top: 12px;
+        .wizardActionBar {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          gap: 10px;
-        }
-        .autoSmall {
-          font-size: 12px;
-          color: var(--muted);
+          gap: 12px;
+          margin-top: 10px;
         }
 
-        .modalOverlay {
+        .wizardMsg {
+          margin-top: 12px;
+        }
+        .wizardMsg:first-child {
+          margin-top: 0;
+        }
+        .wizardMsgMeta {
+          font-size: 12px;
+          opacity: 0.75;
+          margin-bottom: 4px;
+        }
+        .wizardMsgBubble {
+          white-space: pre-wrap;
+          font-size: 14px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(0, 0, 0, 0.10);
+          background: rgba(255, 255, 255, 0.75);
+        }
+        .wizardMsg.user .wizardMsgBubble {
+          background: rgba(0, 0, 0, 0.04);
+        }
+        .wizardMsgFoot {
+          font-size: 12px;
+          opacity: 0.7;
+          margin-top: 6px;
+        }
+        .wizardSources {
+          margin-top: 8px;
+        }
+        .wizardSources summary {
+          cursor: pointer;
+          opacity: 0.85;
+          font-size: 13px;
+        }
+        .wizardSources ul {
+          margin-top: 8px;
+          padding-left: 18px;
+        }
+
+        .wizardGrid {
+          display: grid;
+          /* Smaller square cards so 40–50 skills remain scannable. */
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 12px;
+        }
+        @media (max-width: 860px) {
+          .wizardGrid {
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+          }
+        }
+        .wizardCard {
+          aspect-ratio: 1 / 1;
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          min-height: 180px;
+          /* Override .tile padding to keep cards compact. */
+          padding: 12px;
+        }
+        .wizardCardTop {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 10px;
+        }
+        .wizardCardTitle {
+          font-weight: 900;
+          line-height: 1.15;
+          overflow: hidden;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+        }
+        .wizardCardLine {
+          margin-top: 10px;
+          font-size: 12px;
+          color: rgba(15, 23, 42, 0.72);
+          overflow: hidden;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+        }
+        .wizardCardQuery {
+          margin-top: 10px;
+          font-size: 13px;
+          color: rgba(15, 23, 42, 0.78);
+          overflow: hidden;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+        }
+        .wizardCardFoot {
+          margin-top: 10px;
+          font-size: 12px;
+          opacity: 0.7;
+        }
+
+        .wizardModalBackdrop {
           position: fixed;
           inset: 0;
           background: rgba(15, 23, 42, 0.55);
@@ -719,21 +820,29 @@ export default function WebSearchMvpPanel() {
           align-items: center;
           justify-content: center;
           padding: 18px;
-          z-index: 50;
+          z-index: 9999;
         }
-        .modalCard {
-          width: min(720px, 96vw);
-          max-height: 92vh;
+        .wizardModal {
+          width: min(920px, 96vw);
+          max-height: 90vh;
           overflow: auto;
+          background: rgba(255, 255, 255, 0.98);
           border-radius: 18px;
-          border: 1px solid var(--border);
-          background: var(--card);
-          box-shadow: var(--shadow);
-          padding: 16px;
+          border: 1px solid rgba(0, 0, 0, 0.12);
+          box-shadow: 0 18px 48px rgba(15, 23, 42, 0.28);
+          padding: 14px;
         }
-        .modalTitle {
-          font-size: 16px;
-          font-weight: 800;
+        .wizardModalHead {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 12px;
+        }
+        .wizardModalActions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+          margin-top: 12px;
         }
       `}</style>
     </div>
