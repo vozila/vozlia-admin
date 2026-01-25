@@ -5,26 +5,42 @@ import { RenderLogsPanel } from "../components/RenderLogsPanel";
 import { KBUploadPanel } from "../components/KBUploadPanel";
 import AgentLongTermMemoryTable from "../components/AgentLongTermMemoryTable";
 import WebSearchMvpPanel from "../components/WebSearchMvpPanel";
-import { SectionRow, Switch, TextField, SkillTile, DropZone, DragPayload } from "../components/admin/AdminUi";
+import { SectionRow, Switch, TextField, SkillTile, DropZone, safeParseDragPayload, type DragPayload } from "../components/admin/AdminUi";
 
-// -----------------------------
-// Local types/constants (keep file self-contained)
-// -----------------------------
-type SkillKey = "gmail_summaries" | "sms" | "calendar" | "web_search" | "weather" | "investment_reporting";
+const SKILL_KEYS = ["gmail_summaries", "sms", "calendar", "web_search", "weather", "investment_reporting"] as const;
+type SkillKey = (typeof SKILL_KEYS)[number];
+
+function isSkillKey(v: string): v is SkillKey {
+  return (SKILL_KEYS as readonly string[]).includes(v);
+}
 
 type EmailAccount = {
   id: string;
+  provider_type: string;
   email_address?: string | null;
   display_name?: string | null;
-  provider_type?: string | null;
-  is_active?: boolean;
-  is_primary?: boolean;
+  is_active: boolean;
 };
 
-type Playbook = { id: string; name: string; enabled: boolean; steps: SkillKey[] };
-type Template = { id: string; name: string; enabled: boolean; sequence: Array<{ kind: "playbook"; id: string } | { kind: "skill"; key: SkillKey }> };
+type Playbook = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  steps: SkillKey[];
+};
 
-type WebSearchSkillRow = {
+type TemplateItem =
+  | { kind: "playbook"; id: string }
+  | { kind: "skill"; key: SkillKey };
+
+type Template = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  sequence: TemplateItem[];
+};
+
+type WebSearchSkill = {
   id: string;
   skill_key: string;
   name: string;
@@ -33,21 +49,11 @@ type WebSearchSkillRow = {
   enabled: boolean;
 };
 
-type WebSearchScheduleRow = {
-  id: string;
-  web_search_skill_id: string;
-  enabled: boolean;
-  cadence: string;
-  time_of_day: string;
-  timezone: string;
-  channel: string;
-  destination: string;
-  next_run_at?: string | null;
-  last_run_at?: string | null;
-};
 
-const DEFAULT_INVESTMENT_REPORTING_LLM_PROMPT = `You are Vozlia. Provide a concise, factual stock report for the requested ticker(s). If you do not have verified current pricing data, clearly say so and provide a general company overview instead.`;
-
+/**
+ * Mapping between UI "skill keys" and the Control Plane / Backend skill IDs used in settings.skills_config.
+ * IMPORTANT: Keep these stable; they are persisted in DB config.
+ */
 const SKILL_ID_BY_KEY: Record<SkillKey, string> = {
   gmail_summaries: "gmail_summary",
   sms: "sms",
@@ -58,8 +64,21 @@ const SKILL_ID_BY_KEY: Record<SkillKey, string> = {
 };
 
 const KEY_BY_SKILL_ID: Record<string, SkillKey> = Object.fromEntries(
-  Object.entries(SKILL_ID_BY_KEY).map(([k, v]) => [v, k as SkillKey])
+  (Object.keys(SKILL_ID_BY_KEY) as SkillKey[]).map((k) => [SKILL_ID_BY_KEY[k], k])
 ) as Record<string, SkillKey>;
+
+/**
+ * Default prompt used when Investment Reporting doesn't have a custom llm_prompt configured.
+ * (Front-end-only constant; backend still owns the actual behavior.)
+ */
+const DEFAULT_INVESTMENT_REPORTING_LLM_PROMPT = `
+You are Vozlia's investment reporting assistant.
+Return a concise report for the requested ticker(s):
+- Current price and daily change (if available)
+- 3–6 key bullets: notable news, earnings, major risks, and a plain-English outlook
+- End with a brief disclaimer: "Not financial advice."
+Keep it short and easy to read in voice.
+`.trim();
 
 export default function AdminPage() {
   const { data: session } = useSession();
@@ -72,11 +91,9 @@ export default function AdminPage() {
   const [accounts, setAccounts] = useState<EmailAccount[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
 
-  // Dynamic skills created via the Configuration Wizard (MVP: Web Search)
-  const [wizardWebSearchSkills, setWizardWebSearchSkills] = useState<WebSearchSkillRow[]>([]);
-  const [wizardWebSearchSchedules, setWizardWebSearchSchedules] = useState<WebSearchScheduleRow[]>([]);
 
-
+  const [webSearchSkills, setWebSearchSkills] = useState<WebSearchSkill[]>([]);
+  const [webSearchSkillsLoading, setWebSearchSkillsLoading] = useState(false);
 
   // Concept-only state
   const [open, setOpen] = useState<Record<string, boolean>>({
@@ -228,57 +245,41 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
     setAccountsLoading(false);
   }
 
-
-  async function loadWizardWebSearchCatalog() {
+  
+  async function loadWebSearchSkills() {
+    setWebSearchSkillsLoading(true);
     try {
-      const [skillsRes, schedRes] = await Promise.all([
-        fetch("/api/admin/websearch/skills", { method: "GET" }),
-        fetch("/api/admin/websearch/schedules", { method: "GET" }),
-      ]);
-
-      const skillsData = await skillsRes.json().catch(() => []);
-      const schedData = await schedRes.json().catch(() => []);
-
-      if (skillsRes.ok) setWizardWebSearchSkills(Array.isArray(skillsData) ? (skillsData as WebSearchSkillRow[]) : []);
-      if (schedRes.ok) setWizardWebSearchSchedules(Array.isArray(schedData) ? (schedData as WebSearchScheduleRow[]) : []);
-    } catch {
-      // silent; wizard panel has its own error UI
+      const res = await fetch("/api/admin/websearch/skills", { method: "GET" });
+      const data = await res.json().catch(() => []);
+      if (res.ok) setWebSearchSkills(Array.isArray(data) ? data : []);
+    } finally {
+      setWebSearchSkillsLoading(false);
     }
   }
 
+  async function deleteWebSearchSkill(id: string, name?: string) {
+    const label = name ? `"${name}"` : id;
+    if (!confirm(`Delete Web Search skill ${label}? This cannot be undone.`)) return;
 
-  useEffect(() => {
+    setError(null);
+    try {
+      const res = await fetch(`/api/admin/websearch/skills/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || data?.error || "Delete failed");
+      await loadWebSearchSkills();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
+  }
+
+useEffect(() => {
     loadSettings().catch((e: unknown) => setError(String((e as any)?.message ?? e)));
     loadAccounts().catch((e: unknown) => setError(String((e as any)?.message ?? e)));
-    loadWizardWebSearchCatalog().catch(() => null);
+    loadWebSearchSkills().catch((e: unknown) => setError(String((e as any)?.message ?? e)));
   }, []);
-
-  // When the wizard creates/updates websearch skills, refresh the Skills list automatically.
-  useEffect(() => {
-    const onUpdate = () => {
-      loadWizardWebSearchCatalog().catch(() => null);
-    };
-    window.addEventListener("vozlia:websearch-updated", onUpdate);
-    return () => window.removeEventListener("vozlia:websearch-updated", onUpdate);
-  }, []);
-
-
 
   const gmailAccounts = useMemo(() => accounts.filter((a) => a.provider_type === "gmail"), [accounts]);
   const gmailActiveAccounts = useMemo(() => gmailAccounts.filter((a) => a.is_active), [gmailAccounts]);
-
-
-  const wizardSchedulesBySkillId = useMemo(() => {
-    const out: Record<string, WebSearchScheduleRow[]> = {};
-    for (const s of wizardWebSearchSchedules) {
-      const sid = s.web_search_skill_id;
-      if (!sid) continue;
-      (out[sid] ||= []).push(s);
-    }
-    return out;
-  }, [wizardWebSearchSchedules]);
-
-
 
   const selectedPlaybook = useMemo(() => playbooks.find((p) => p.id === selectedPlaybookId) ?? playbooks[0], [playbooks, selectedPlaybookId]);
   const selectedTemplate = useMemo(() => templates.find((t) => t.id === selectedTemplateId) ?? templates[0], [templates, selectedTemplateId]);
@@ -310,7 +311,11 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 
       // NEW: Modular per-skill config (all skills; backend may choose to use subset)
       skills_config: (() => {
-        const out: any = {};
+        const base: any =
+          settings && typeof settings === "object" && (settings as any).skills_config && typeof (settings as any).skills_config === "object" && !Array.isArray((settings as any).skills_config)
+            ? { ...((settings as any).skills_config as any) }
+            : {};
+        const out: any = { ...base };
         const parseLines = (v: string) =>
           (v || "")
             .split("\n")
@@ -349,7 +354,12 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
       })(),
 
       // NEW: Greeting priority order (skill IDs)
-      skills_priority_order: greetingPriority.map((k) => SKILL_ID_BY_KEY[k]),
+      skills_priority_order: (() => {
+        const known = greetingPriority.map((k) => SKILL_ID_BY_KEY[k]);
+        const baseOrder = Array.isArray((settings as any).skills_priority_order) ? ((settings as any).skills_priority_order as string[]) : [];
+        const unknown = baseOrder.filter((sid) => !known.includes(sid));
+        return [...known, ...unknown];
+      })(),
       // NEW: Memory wiring
       shortterm_memory_enabled: !!settings.shortterm_memory_enabled,
       longterm_memory_enabled: !!settings.longterm_memory_enabled,
@@ -532,7 +542,9 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                   subtitle="Drop a skill tile here to move it to the top."
                   onDropPayload={(p) => {
                     if (p.type !== "skill") return;
-                    setGreetingPriority((cur) => [p.key as SkillKey, ...cur.filter((k) => k !== (p.key as SkillKey))]);
+                    if (!isSkillKey(p.key)) return;
+                    const key = p.key;
+                    setGreetingPriority((cur) => [key, ...cur.filter((k) => k !== key)]);
                   }}
                 >
                   <div className="list">
@@ -549,50 +561,48 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 
 
             <div className="panel" style={{ marginTop: 14 }}>
-              <div className="panelTitle">Custom Skills (created via Wizard)</div>
+              <div className="panelTitle">Saved Web Search Skills</div>
               <div className="panelSub">
-                Skills created conversationally (MVP: saved Web Search queries). They will appear here automatically after creation.
+                Skills created in the Configuration Wizard. These are independent from the built-in “Web Search” skill tile above.
               </div>
 
               <div className="actions" style={{ marginTop: 10 }}>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => loadWizardWebSearchCatalog().catch(() => null)}
-                >
-                  Refresh
+                <button type="button" className="btnSecondary" disabled={webSearchSkillsLoading} onClick={() => loadWebSearchSkills().catch(() => null)}>
+                  {webSearchSkillsLoading ? "Refreshing…" : "Refresh"}
+                </button>
+                <button type="button" className="btnSecondary" onClick={() => setOpen((p) => ({ ...p, websearchMvp: true }))}>
+                  Open Configuration Wizard
                 </button>
               </div>
 
-              {wizardWebSearchSkills.length ? (
-                <div className="list" style={{ marginTop: 10 }}>
-                  {wizardWebSearchSkills.map((s) => {
-                    const sched = wizardSchedulesBySkillId[s.id] || [];
-                    const next = sched.find((x) => x.enabled)?.next_run_at || null;
-                    const when = next ? new Date(next).toLocaleString() : "—";
-                    return (
-                      <div key={s.id} className="listItem" style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                        <div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span className="mono">{s.name}</span>
-                            <span className={`pill ${s.enabled ? "pillOn" : "pillOff"}`}>{s.enabled ? "Enabled" : "Disabled"}</span>
-                            <span className="pill">websearch</span>
-                          </div>
-                          <div className="panelSub" style={{ marginTop: 6 }}>
-                            Triggers: {Array.isArray(s.triggers) && s.triggers.length ? s.triggers.join(", ") : "—"}
-                          </div>
-                        </div>
-                        <div style={{ textAlign: "right" }}>
-                          <div className="panelSub">Next run: {when}</div>
-                        </div>
-                      </div>
-                    );
-                  })}
+              {webSearchSkills.length === 0 ? (
+                <div className="muted" style={{ marginTop: 10 }}>
+                  No saved Web Search skills yet. Create one in the Configuration Wizard.
                 </div>
               ) : (
-                <div className="panelSub" style={{ marginTop: 10 }}>No custom skills yet. Create one in the Configuration Wizard panel.</div>
+                <div className="list" style={{ marginTop: 10 }}>
+                  {webSearchSkills.map((s) => (
+                    <div key={s.id} className="listSelect" style={{ cursor: "default" }}>
+                      <div className="row">
+                        <div className="rowMain">
+                          <div className="rowTitle">{s.name}</div>
+                          <div className="rowSub mono">{s.id}</div>
+                          <div className="rowSub">{s.query}</div>
+                          {s.triggers?.length ? <div className="rowSub">Triggers: {s.triggers.join(", ")}</div> : null}
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <span className={`pill ${s.enabled ? "pillOn" : "pillOff"}`}>{s.enabled ? "Enabled" : "Disabled"}</span>
+                          <button type="button" className="btnSecondary" onClick={() => deleteWebSearchSkill(s.id, s.name)}>
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
+
             {activeSkill ? (
               <div className="panel" style={{ marginTop: 14 }}>
                 <div className="panelTitle">Configure: {activeSkill}</div>
@@ -735,7 +745,7 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
 
           <SectionRow
             title="Configuration Wizard"
-            subtitle="ChatGPT-style setup for quick answers + creating/scheduling skills (starting with Web Search)."
+            subtitle="ChatGPT-style wizard to answer questions and (optionally) turn them into skills with schedules + notifications. (Currently: Web Search.)"
             open={open.websearchMvp}
             onToggle={() => setOpen((p) => ({ ...p, websearchMvp: !p.websearchMvp }))}
           >
@@ -796,11 +806,13 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                   subtitle="Drop a skill tile here to append it."
                   onDropPayload={(p) => {
                     if (p.type !== "skill") return;
+                    if (!isSkillKey(p.key)) return;
+                    const key = p.key;
                     setPlaybooks((cur) =>
                       cur.map((pb) => {
                         if (pb.id !== selectedPlaybookId) return pb;
-                        const exists = pb.steps.includes(p.key);
-                        return exists ? pb : { ...pb, steps: [...pb.steps, p.key] };
+                        const exists = pb.steps.includes(key);
+                        return exists ? pb : { ...pb, steps: [...pb.steps, key] };
                       })
                     );
                   }}
@@ -877,8 +889,13 @@ const [logToggles, setLogToggles] = useState<Record<string, boolean>>({
                   title="Template Sequence"
                   subtitle="Drop a playbook or skill to append it."
                   onDropPayload={(p) => {
-                    const item: TemplateItem | null =
-                      p.type === "playbook" ? { kind: "playbook", id: p.id } : { kind: "skill", key: p.key };
+                    let item: TemplateItem | null = null;
+                    if (p.type === "playbook") {
+                      item = { kind: "playbook", id: p.id };
+                    } else if (p.type === "skill") {
+                      if (!isSkillKey(p.key)) return;
+                      item = { kind: "skill", key: p.key };
+                    }
 
                     if (!item) return;
 
