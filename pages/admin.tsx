@@ -1,5 +1,5 @@
 import type { GetServerSidePropsContext } from "next";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSession, signIn, signOut } from "next-auth/react";
 import { RenderLogsPanel } from "../components/RenderLogsPanel";
 import { KBUploadPanel } from "../components/KBUploadPanel";
@@ -112,6 +112,17 @@ export default function AdminPage() {
   });
 
   const [activeSkill, setActiveSkill] = useState<SkillKey | null>(null);
+  const configPanelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!activeSkill) return;
+    // Ensure the config panel is visible even if the Saved Web Search Skills list is long.
+    // NOTE: double-clicking a tile fires 2 clicks; we keep tiles "select-only" and provide an explicit Close button.
+    requestAnimationFrame(() => {
+      configPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, [activeSkill]);
+
 
   // Skill config (concept fields)
   type SkillCfgState = {
@@ -491,7 +502,7 @@ useEffect(() => {
                   desc={appendToGreetingNote("gmail_summaries")}
                   enabled={skillCfg.gmail_summaries.enabled}
                   active={activeSkill === "gmail_summaries"}
-                  onClick={() => setActiveSkill((s) => (s === "gmail_summaries" ? null : "gmail_summaries"))}
+                  onClick={() => setActiveSkill("gmail_summaries")}
                   draggableKey="gmail_summaries"
                 />
                 <SkillTile
@@ -499,7 +510,7 @@ useEffect(() => {
                   desc={appendToGreetingNote("sms")}
                   enabled={skillCfg.sms.enabled}
                   active={activeSkill === "sms"}
-                  onClick={() => setActiveSkill((s) => (s === "sms" ? null : "sms"))}
+                  onClick={() => setActiveSkill("sms")}
                   draggableKey="sms"
                 />
                 <SkillTile
@@ -507,7 +518,7 @@ useEffect(() => {
                   desc={appendToGreetingNote("calendar")}
                   enabled={skillCfg.calendar.enabled}
                   active={activeSkill === "calendar"}
-                  onClick={() => setActiveSkill((s) => (s === "calendar" ? null : "calendar"))}
+                  onClick={() => setActiveSkill("calendar")}
                   draggableKey="calendar"
                 />
                 <SkillTile
@@ -515,7 +526,7 @@ useEffect(() => {
                   desc={appendToGreetingNote("web_search")}
                   enabled={skillCfg.web_search.enabled}
                   active={activeSkill === "web_search"}
-                  onClick={() => setActiveSkill((s) => (s === "web_search" ? null : "web_search"))}
+                  onClick={() => setActiveSkill("web_search")}
                   draggableKey="web_search"
                 />
                 <SkillTile
@@ -523,7 +534,7 @@ useEffect(() => {
                   desc={appendToGreetingNote("weather")}
                   enabled={skillCfg.weather.enabled}
                   active={activeSkill === "weather"}
-                  onClick={() => setActiveSkill((s) => (s === "weather" ? null : "weather"))}
+                  onClick={() => setActiveSkill("weather")}
                   draggableKey="weather"
                 />
                 <SkillTile
@@ -531,7 +542,7 @@ useEffect(() => {
                   desc={appendToGreetingNote("investment_reporting")}
                   enabled={skillCfg.investment_reporting.enabled}
                   active={activeSkill === "investment_reporting"}
-                  onClick={() => setActiveSkill((s) => (s === "investment_reporting" ? null : "investment_reporting"))}
+                  onClick={() => setActiveSkill("investment_reporting")}
                   draggableKey="investment_reporting"
                 />
               </div>
@@ -607,9 +618,16 @@ useEffect(() => {
             </div>
 
             {activeSkill ? (
-              <div className="panel" style={{ marginTop: 14 }}>
-                <div className="panelTitle">Configure: {activeSkill}</div>
-                <div className="panelSub">Concept controls (we’ll wire these to the control plane next).</div>
+              <div ref={configPanelRef} className="panel" style={{ marginTop: 14 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+                  <div>
+                    <div className="panelTitle">Configure: {activeSkill}</div>
+                    <div className="panelSub">Concept controls (we’ll wire these to the control plane next).</div>
+                  </div>
+                  <button type="button" className="btnSecondary" onClick={() => setActiveSkill(null)}>
+                    Close
+                  </button>
+                </div>
 
                 <div className="form">
                   {/* Gmail enable is wired to current settings; others are concept */}
