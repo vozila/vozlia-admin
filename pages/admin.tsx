@@ -5,6 +5,7 @@ import { RenderLogsPanel } from "../components/RenderLogsPanel";
 import { KBUploadPanel } from "../components/KBUploadPanel";
 import AgentLongTermMemoryTable from "../components/AgentLongTermMemoryTable";
 import WebSearchMvpPanel from "../components/WebSearchMvpPanel";
+import DBQuerySkillsPanel from "../components/DBQuerySkillsPanel";
 import { SectionRow, Switch, TextField, SkillTile, DropZone, safeParseDragPayload, type DragPayload } from "../components/admin/AdminUi";
 
 const SKILL_KEYS = ["gmail_summaries", "sms", "calendar", "web_search", "weather", "investment_reporting"] as const;
@@ -771,6 +772,10 @@ useEffect(() => {
             onToggle={() => setOpen((p) => ({ ...p, websearchMvp: !p.websearchMvp }))}
           >
             <WebSearchMvpPanel />
+
+          <div className="mt-6">
+            <DBQuerySkillsPanel />
+          </div>
           </SectionRow>
 
           <SectionRow
