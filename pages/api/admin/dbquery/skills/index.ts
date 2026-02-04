@@ -9,13 +9,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const adminKey = (session?.user as any)?.adminKey;
   if (!adminKey) return res.status(401).json({ detail: "Not authenticated" });
 
-  const { id } = req.query;
-  if (!id || Array.isArray(id)) return res.status(400).json({ detail: "Missing id" });
-
-  if (req.method === "DELETE") {
-    const r = await fetch(`${CONTROL_BASE_URL}/admin/dbquery/skills/${id}`, {
-      method: "DELETE",
+  if (req.method === "GET") {
+    const r = await fetch(`${CONTROL_BASE_URL}/admin/dbquery/skills`, {
       headers: { "x-admin-key": adminKey },
+    });
+    const body = await r.json().catch(() => ({}));
+    return res.status(r.status).json(body);
+  }
+
+  if (req.method === "POST") {
+    const r = await fetch(`${CONTROL_BASE_URL}/admin/dbquery/skills`, {
+      method: "POST",
+      headers: { "x-admin-key": adminKey, "content-type": "application/json" },
+      body: JSON.stringify(req.body || {}),
     });
     const body = await r.json().catch(() => ({}));
     return res.status(r.status).json(body);
