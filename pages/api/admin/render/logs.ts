@@ -37,8 +37,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const qs = new URLSearchParams({ service_id, start_ms, end_ms });
   const instance_id = asString(req.query.instance_id);
   const limit = asString(req.query.limit);
+  const q = asString(req.query.q);
   if (instance_id) qs.set("instance_id", instance_id);
   if (limit) qs.set("limit", limit);
+  if (q) qs.set("q", q);
 
   const url = `${controlBase()}/admin/render/logs?${qs.toString()}`;
 
