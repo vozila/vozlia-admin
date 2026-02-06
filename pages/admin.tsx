@@ -2,6 +2,7 @@ import type { GetServerSidePropsContext } from "next";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSession, signIn, signOut } from "next-auth/react";
 import { RenderLogsPanel } from "../components/RenderLogsPanel";
+import StatusBadgePanel from "../components/StatusBadgePanel";
 import { KBUploadPanel } from "../components/KBUploadPanel";
 import AgentLongTermMemoryTable from "../components/AgentLongTermMemoryTable";
 import WebSearchMvpPanel from "../components/WebSearchMvpPanel";
@@ -1250,6 +1251,7 @@ useEffect(() => {
                 <div className="panelSub">Existing panel embedded near the bottom.</div>
               </div>
               <div style={{ padding: 14, paddingTop: 0 }}>
+        <StatusBadgePanel />
         <RenderLogsPanel />
               </div>
             </div>
