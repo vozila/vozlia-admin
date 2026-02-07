@@ -16,6 +16,11 @@ function adminKey(): string {
   return mustEnv("VOZLIA_ADMIN_KEY");
 }
 
+function looksLikeJson(text: string): boolean {
+  const t = (text || "").trim();
+  return t.startsWith("{") || t.startsWith("[");
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const session = await getServerSession(req, res, authOptions);
   if (!session) return res.status(401).json({ error: "unauthorized" });
@@ -35,19 +40,41 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       body: JSON.stringify(req.body ?? {}),
     });
 
+    const status = upstream.status;
+    const upstreamContentType = upstream.headers.get("content-type") || "";
     const text = await upstream.text();
-    res.status(upstream.status);
-    res.setHeader("content-type", upstream.headers.get("content-type") || "application/json");
 
-    try {
-      return res.json(text ? JSON.parse(text) : {});
-    } catch {
-      return res.send(text);
+    // IMPORTANT: This route should always return JSON so the browser client can safely call res.json().
+    // If the upstream returns non-JSON (e.g. plain "Internal Server Error"), wrap it in a JSON envelope.
+    let payload: any = {};
+    let parsed = false;
+
+    if (upstreamContentType.includes("application/json") || looksLikeJson(text)) {
+      try {
+        payload = text ? JSON.parse(text) : {};
+        parsed = true;
+      } catch {
+        parsed = false;
+      }
     }
+
+    if (!parsed) {
+      payload = {
+        error: "upstream_non_json_response",
+        upstream_status: status,
+        upstream_content_type: upstreamContentType,
+        upstream_text: (text || "").slice(0, 4000),
+      };
+    }
+
+    res.status(status);
+    res.setHeader("content-type", "application/json");
+    return res.json(payload);
   } catch (err: any) {
     return res.status(502).json({
+      error: "upstream_request_failed",
       detail: "Upstream request failed",
-      error: err?.message ?? String(err),
+      message: err?.message ?? String(err),
     });
   }
 }
