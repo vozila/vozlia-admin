@@ -19,6 +19,12 @@ export default function StatusBadgePanel() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
 
+  // Poll interval for /admin/diag/regression (seconds).
+  // Use NEXT_PUBLIC_REGRESSION_POLL_SECONDS to override (default: 30).
+  const pollSecondsRaw = (process.env.NEXT_PUBLIC_REGRESSION_POLL_SECONDS ?? "30").trim();
+  const pollSeconds = Math.max(5, Number.parseInt(pollSecondsRaw, 10) || 30);
+  const pollMs = pollSeconds * 1000;
+
   async function refresh() {
     setLoading(true);
     setError(null);
@@ -38,7 +44,7 @@ export default function StatusBadgePanel() {
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 30_000);
+    const t = setInterval(refresh, pollMs);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
