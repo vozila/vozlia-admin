@@ -200,12 +200,14 @@ export default function WebSearchMvpPanel() {
           }
         }
       } catch {}
+      const citations = Array.isArray((out as any)?.citations) ? (out as any).citations : [];
 
       setRunOut({
         query: q,
         answer: out.reply ?? "",
         sources,
-      });
+        citations,
+      } as any);
 
       // Refresh saved skills/schedules from the wizard response (fallback: keep existing).
       if (Array.isArray(out.websearch_skills)) setSkills(out.websearch_skills);
@@ -217,6 +219,7 @@ export default function WebSearchMvpPanel() {
           role: "assistant",
           text: out.reply ?? "",
           sources,
+          citations,
         },
       ]);
     } catch (e: any) {
@@ -401,6 +404,20 @@ export default function WebSearchMvpPanel() {
                           {s.title || s.url}
                         </a>
                         {s.snippet ? <div className="muted">{s.snippet}</div> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+              {m.role === "assistant" && Array.isArray((m as any).citations) && (m as any).citations.length ? (
+                <details className="wizardSources">
+                  <summary>Citations ({(m as any).citations.length})</summary>
+                  <ul>
+                    {(m as any).citations.slice(0, 8).map((c: any, cIdx: number) => (
+                      <li key={cIdx}>
+                        <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                          {JSON.stringify(c, null, 2)}
+                        </pre>
                       </li>
                     ))}
                   </ul>

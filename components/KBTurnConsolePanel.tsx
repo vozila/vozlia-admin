@@ -66,6 +66,8 @@ export function KBTurnConsolePanel({ tenantId }: { tenantId: string }) {
   const canUse = (tenantId || "").trim().length > 0;
   const debugEnabled = (process.env.NEXT_PUBLIC_DEBUG_UI || "0") === "1";
 
+  const pollMs = Math.max(500, parseInt(process.env.NEXT_PUBLIC_MEMORY_TURNS_POLL_MS || "3000", 10) || 3000);
+
   // Load recent calls for this tenant
   useEffect(() => {
     let cancelled = false;
@@ -147,7 +149,7 @@ export function KBTurnConsolePanel({ tenantId }: { tenantId: string }) {
         if (!cancelled) setErr(e?.message || String(e));
       } finally {
         if (!cancelled) setLoading(false);
-        if (!cancelled) timer = setTimeout(tick, 3000);
+        if (!cancelled) timer = setTimeout(tick, pollMs);
       }
     }
 
